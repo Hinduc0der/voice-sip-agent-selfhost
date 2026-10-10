@@ -31,8 +31,14 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
     @Volatile var usedMethod = "none"; private set
     @Volatile var downFrames = 0L; private set
     @Volatile var upFrames = 0L; private set
+    /** Max sample magnitude seen over the whole tap. */
     @Volatile var downPeak = 0; private set
     @Volatile var upPeak = 0; private set
+    /** Frames whose peak exceeds [VOICE_THRESHOLD], i.e. not silence. */
+    @Volatile var downVoiced = 0L; private set
+    @Volatile var upVoiced = 0L; private set
+    private var windowDown = 0
+    private var windowUp = 0
     @Volatile var error: String? = null; private set
 
     /** Opens the audio paths and returns the app's end of the socket pair. */
@@ -53,19 +59,13 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
     }
 
     private fun openAudio() {
-        val am = ShellEnv.audioManager(ctx)
         val failures = ArrayList<String>()
         if (method == AudioMethod.AUTO || method == AudioMethod.OFFICIAL) {
+            // Same objects AudioManager.getCall{Downlink,Uplink}*() would build, but with an explicit
+            // shell-attributed Context: the helpers take attribution from the process, which in the
+            // Shizuku UserService is the app package and is rejected by AudioFlinger for uid 2000.
             try {
-                record = am.javaClass.getMethod("getCallDownlinkExtractionAudioRecord", AudioFormat::class.java)
-                    .invoke(am, format(AudioFormat.CHANNEL_IN_MONO)) as AudioRecord
-                try {
-                    track = am.javaClass.getMethod("getCallUplinkInjectionAudioTrack", AudioFormat::class.java)
-                        .invoke(am, format(AudioFormat.CHANNEL_OUT_MONO)) as AudioTrack
-                } catch (t: Throwable) {
-                    record.release()
-                    throw t
-                }
+                openRedirected()
                 usedMethod = "official"
                 return
             } catch (t: Throwable) {
@@ -82,26 +82,49 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
         }
     }
 
+    private fun openRedirected() {
+        val pstn = runCatching { AudioManager::class.java.getField("CALL_REDIRECT_PSTN").getInt(null) }.getOrDefault(1)
+        val rb = AudioRecord.Builder().setContext(ctx).setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO))
+        AudioRecord.Builder::class.java.getMethod("setCallRedirectionMode", Int::class.javaPrimitiveType).invoke(rb, pstn)
+        record = rb.build()
+        check(record.state == AudioRecord.STATE_INITIALIZED) { "PSTN record not initialized" }
+        try {
+            val tb = AudioTrack.Builder().setContext(ctx).setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
+            AudioTrack.Builder::class.java.getMethod("setCallRedirectionMode", Int::class.javaPrimitiveType).invoke(tb, pstn)
+            track = tb.build()
+            check(track.state == AudioTrack.STATE_INITIALIZED) { "PSTN track not initialized" }
+        } catch (t: Throwable) {
+            record.release()
+            throw t
+        }
+    }
+
     /** AirSIM-style fallback for devices without the official interception API. */
     private fun openLegacy() {
         val minRec = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         record = AudioRecord.Builder().setContext(ctx).setAudioSource(MediaRecorder.AudioSource.VOICE_DOWNLINK)
             .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(minRec, FRAME * 10)).build()
         check(record.state == AudioRecord.STATE_INITIALIZED) { "VOICE_DOWNLINK record not initialized" }
-        val minTrack = AudioTrack.getMinBufferSize(RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        track = AudioTrack.Builder()
-            .setAudioAttributes(
-                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(),
-            )
-            .setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
-            .setBufferSizeInBytes(maxOf(minTrack, FRAME * 10))
-            .setTransferMode(AudioTrack.MODE_STREAM).build()
-        val am = ShellEnv.audioManager(ctx)
-        val tx = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.type == AudioDeviceInfo.TYPE_TELEPHONY }
-        if (tx == null || !track.setPreferredDevice(tx)) {
-            record.release(); track.release()
-            error("no TYPE_TELEPHONY sink")
+        try {
+            val minTrack = AudioTrack.getMinBufferSize(RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            track = AudioTrack.Builder()
+                .setContext(ctx)
+                .setAudioAttributes(
+                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(),
+                )
+                .setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
+                .setBufferSizeInBytes(maxOf(minTrack, FRAME * 10))
+                .setTransferMode(AudioTrack.MODE_STREAM).build()
+            val am = ShellEnv.audioManager(ctx)
+            val tx = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.type == AudioDeviceInfo.TYPE_TELEPHONY }
+            if (tx == null || !track.setPreferredDevice(tx)) {
+                track.release()
+                error("no TYPE_TELEPHONY sink")
+            }
+        } catch (t: Throwable) {
+            record.release()
+            throw t
         }
     }
 
@@ -112,9 +135,17 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
                 val n = record.read(buf, 0, FRAME, AudioRecord.READ_BLOCKING)
                 if (n < 0) { error = "record read $n"; break }
                 if (n < FRAME) continue
-                downPeak = peak(buf)
+                val p = peak(buf)
+                if (p > downPeak) downPeak = p
+                if (p > VOICE_THRESHOLD) downVoiced++
+                if (p > windowDown) windowDown = p
                 Os.write(local, buf, 0, FRAME)
-                downFrames++
+                if (++downFrames % 250 == 0L) {
+                    // Every 5 s: levels only, never audio content.
+                    Log.i(TAG, "levels t=${downFrames / 50}s downPeak5s=$windowDown upPeak5s=$windowUp up=$upFrames")
+                    windowDown = 0
+                    windowUp = 0
+                }
             }
         } catch (e: ErrnoException) {
             if (running && e.errno != OsConstants.EPIPE && e.errno != OsConstants.ECONNRESET) error = "down: ${e.message}"
@@ -131,7 +162,10 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
             while (running) {
                 val n = Os.read(local, buf, 0, FRAME)
                 if (n <= 0) break // peer closed
-                upPeak = peak(buf)
+                val p = peak(buf)
+                if (p > upPeak) upPeak = p
+                if (p > VOICE_THRESHOLD) upVoiced++
+                if (p > windowUp) windowUp = p
                 var off = 0
                 while (off < n && running) {
                     val w = track.write(buf, off, n - off, AudioTrack.WRITE_BLOCKING)
@@ -164,7 +198,8 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
         Log.i(TAG, "tap closed ${stats()}")
     }
 
-    fun stats() = "method=$usedMethod down=$downFrames up=$upFrames downPeak=$downPeak upPeak=$upPeak" +
+    fun stats() = "method=$usedMethod down=$downFrames up=$upFrames downPeak=$downPeak upPeak=$upPeak " +
+        "downVoiced=$downVoiced upVoiced=$upVoiced" +
         (error?.let { " error=$it" } ?: "")
 
     private fun peak(b: ByteArray): Int {
@@ -191,5 +226,6 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
         private const val TAG = "VsaTap"
         const val RATE = 8000
         const val FRAME = 320
+        private const val VOICE_THRESHOLD = 300
     }
 }
