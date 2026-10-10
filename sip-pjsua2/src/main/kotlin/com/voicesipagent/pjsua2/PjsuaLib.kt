@@ -6,8 +6,12 @@ import org.pjsip.pjsua2.IpChangeParam
 import org.pjsip.pjsua2.LogEntry
 import org.pjsip.pjsua2.LogWriter
 import org.pjsip.pjsua2.TransportConfig
+import org.pjsip.pjsua2.pj_ssl_sock_proto
 import org.pjsip.pjsua2.pj_log_decoration
 import org.pjsip.pjsua2.pjsip_transport_type_e
+import java.security.KeyStore
+import java.security.cert.X509Certificate
+import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledFuture
@@ -34,11 +38,14 @@ internal object PjsuaLib {
     @Volatile private var thread: Thread? = null
     @Volatile var log: PjsipLog = PjsipLog.Silent
 
+    /** pjsip's own info-level (3) lines; errors and warnings (1-2) always pass. */
+    @Volatile var verbose = false
+
     // pjsua thread only
     lateinit var ep: Endpoint
         private set
     private lateinit var logWriter: LogWriter
-    private val udpTransports = HashMap<Int, Int>()
+    private val transports = HashMap<Pair<SipTransport, Int>, Int>()
 
     val running: Boolean get() = thread != null
 
@@ -88,21 +95,49 @@ internal object PjsuaLib {
         }
     }
 
-    /** Shared UDP transport per local port; kept open so endpoint restarts can rebind instantly. */
-    fun udpTransport(port: Int): Int = udpTransports.getOrPut(port) {
+    /** Shared transport per type and local port; kept open so endpoint restarts can rebind instantly. */
+    fun transport(type: SipTransport, port: Int): Int = transports.getOrPut(type to port) {
         val cfg = TransportConfig()
         cfg.port = port.toLong()
-        ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, cfg).also { cfg.delete() }
+        val pjType = when (type) {
+            SipTransport.UDP -> pjsip_transport_type_e.PJSIP_TRANSPORT_UDP
+            SipTransport.TCP -> pjsip_transport_type_e.PJSIP_TRANSPORT_TCP
+            SipTransport.TLS -> {
+                cfg.tlsConfig.apply {
+                    caBuf = systemCaPem()
+                    verifyServer = true
+                    proto = (pj_ssl_sock_proto.PJ_SSL_SOCK_PROTO_TLS1_2 or pj_ssl_sock_proto.PJ_SSL_SOCK_PROTO_TLS1_3).toLong()
+                }
+                pjsip_transport_type_e.PJSIP_TRANSPORT_TLS
+            }
+        }
+        ep.transportCreate(pjType, cfg).also { cfg.delete() }
     }
 
     /** Graceful: pjsua destroys the socket once pending transactions (e.g. the unregister) finish. */
-    fun closeUdpTransport(port: Int) {
-        val id = udpTransports.remove(port) ?: return
+    fun closeTransport(type: SipTransport, port: Int) {
+        val id = transports.remove(type to port) ?: return
         try {
             ep.transportClose(id)
         } catch (e: Exception) {
             log.warn("transportClose failed: ${e.message}")
         }
+    }
+
+    /** The Android system trust store as one PEM bundle for OpenSSL. */
+    private fun systemCaPem(): String {
+        val ks = KeyStore.getInstance("AndroidCAStore").apply { load(null) }
+        val enc = Base64.getMimeEncoder(64, "\n".toByteArray())
+        val sb = StringBuilder()
+        var n = 0
+        for (alias in ks.aliases()) {
+            if (!alias.startsWith("system:")) continue
+            val cert = ks.getCertificate(alias) as? X509Certificate ?: continue
+            sb.append("-----BEGIN CERTIFICATE-----\n").append(enc.encodeToString(cert.encoded)).append("\n-----END CERTIFICATE-----\n")
+            n++
+        }
+        log.info("TLS trust store: $n system CAs")
+        return sb.toString()
     }
 
     fun redact(s: String): String = DIGITS.replace(s) { "**" + it.value.takeLast(2) }
@@ -122,6 +157,7 @@ internal object PjsuaLib {
         logWriter = object : LogWriter() {
             override fun write(entry: LogEntry) {
                 // msgLogging is off, so no SIP message dumps; digit runs (numbers) are still masked.
+                if (entry.level > 2 && !verbose) return
                 val msg = "pj: " + redact(entry.msg.trimEnd())
                 if (entry.level <= 2) log.warn(msg) else log.info(msg)
             }

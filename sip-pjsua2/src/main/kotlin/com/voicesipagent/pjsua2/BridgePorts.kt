@@ -16,6 +16,8 @@ import java.util.ArrayDeque
  */
 internal class FrameFifo(private val maxFrames: Int = 5) {
     private val q = ArrayDeque<ShortArray>()
+    /** Overflow before the consumer starts (pre-bridge backlog) is expected and not counted. */
+    @Volatile var counting = false
     var dropped = 0L
         private set
     var underruns = 0L
@@ -29,7 +31,7 @@ internal class FrameFifo(private val maxFrames: Int = 5) {
         frames++
         while (q.size > maxFrames) {
             q.removeFirst()
-            dropped++
+            if (counting) dropped++
         }
     }
 
@@ -57,10 +59,14 @@ internal class PjsipMediaPort : MediaPort {
         if (!reading) {
             reading = true
             fromSip.clear()
+            fromSip.counting = true
         }
         return fromSip.pop() ?: VoiceFormat.silence()
     }
-    override fun writeFrame(frame: ShortArray) = toSip.push(frame)
+    override fun writeFrame(frame: ShortArray) {
+        toSip.counting = true
+        toSip.push(frame)
+    }
 
     fun stats() = "fromSip[$fromSip] toSip[$toSip]"
 }

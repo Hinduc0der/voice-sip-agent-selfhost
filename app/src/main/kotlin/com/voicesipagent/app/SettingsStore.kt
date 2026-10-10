@@ -19,6 +19,12 @@ data class GatewaySettings(
     val muteEarpiece: Boolean = true,
     val server: String = "",
     val port: Int = 5060,
+    /** udp | tcp | tls; the built-in stack only supports udp. */
+    val sipTransport: String = "udp",
+    /** off | optional | mandatory SDES-SRTP (pjsua2 over TLS only). */
+    val srtp: String = "optional",
+    /** pjsip info-level logging (development); errors/warnings are always logged. */
+    val sipDebugLog: Boolean = false,
     val username: String = "",
     val password: String = "",
     val domain: String = "",
@@ -35,7 +41,7 @@ data class GatewaySettings(
     val sipConfigured: Boolean get() = server.isNotBlank() && username.isNotBlank() && password.isNotEmpty()
 
     override fun toString() =
-        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece stack=$sipStack server=$server:$port user=$username target=$inboundTarget)"
+        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece stack=$sipStack server=$server:$port/$sipTransport srtp=$srtp user=$username target=$inboundTarget)"
 }
 
 enum class SipStack(val id: String) {
@@ -60,6 +66,9 @@ class SettingsStore(context: Context) {
         muteEarpiece = prefs.getBoolean("mute_earpiece", true),
         server = prefs.getString("server", "")!!,
         port = prefs.getInt("port", 5060),
+        sipTransport = prefs.getString("sip_transport", "udp")!!,
+        srtp = prefs.getString("srtp", "optional")!!,
+        sipDebugLog = prefs.getBoolean("sip_debug_log", false),
         username = prefs.getString("username", "")!!,
         password = prefs.getString("password_sealed", null)?.let(::unseal).orEmpty(),
         domain = prefs.getString("domain", "")!!,
@@ -77,6 +86,9 @@ class SettingsStore(context: Context) {
             .putBoolean("mute_earpiece", s.muteEarpiece)
             .putString("server", s.server.trim())
             .putInt("port", s.port)
+            .putString("sip_transport", s.sipTransport.trim().lowercase())
+            .putString("srtp", s.srtp.trim().lowercase())
+            .putBoolean("sip_debug_log", s.sipDebugLog)
             .putString("username", s.username.trim())
             .putString("password_sealed", seal(s.password))
             .putString("domain", s.domain.trim())

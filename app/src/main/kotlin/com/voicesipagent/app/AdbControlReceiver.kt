@@ -11,6 +11,8 @@ import android.content.Intent
  *   ... --es op setup | sip-restart | loopback --ez on true | takeover --ez on false
  *   ... --es op earpiece-mute --ez on false
  *   ... --es op sip-stack --es stack pjsua2|builtin
+ *   ... --es op provision --es server sip.example.org --ei port 5061 --es transport tls --es domain sip.example.org [--es srtp optional]
+ *   ... --es op sip-debug --ez on true      (pjsip info-level logs; off by default)
  */
 class AdbControlReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -22,6 +24,7 @@ class AdbControlReceiver : BroadcastReceiver() {
             "loopback" -> rt.setLoopbackTest(intent.getBooleanExtra("on", true))
             "takeover" -> rt.setTakeover(intent.getBooleanExtra("on", true))
             "earpiece-mute" -> rt.setMuteEarpiece(intent.getBooleanExtra("on", true))
+            "sip-debug" -> rt.setSipDebugLog(intent.getBooleanExtra("on", true))
             "sip-stack" -> {
                 val stack = SipStack.of(intent.getStringExtra("stack"))
                 if (stack == null) AppLog.w("adb control: sip-stack needs --es stack builtin|pjsua2")
@@ -33,6 +36,8 @@ class AdbControlReceiver : BroadcastReceiver() {
                     cur.copy(
                         server = intent.getStringExtra("server") ?: cur.server,
                         port = intent.getIntExtra("port", cur.port),
+                        sipTransport = intent.getStringExtra("transport") ?: cur.sipTransport,
+                        srtp = intent.getStringExtra("srtp") ?: cur.srtp,
                         username = intent.getStringExtra("user") ?: cur.username,
                         password = intent.getStringExtra("password") ?: cur.password,
                         domain = intent.getStringExtra("domain") ?: cur.domain,

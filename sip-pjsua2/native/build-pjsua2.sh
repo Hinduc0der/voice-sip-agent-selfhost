@@ -5,11 +5,14 @@
 # Both are git-ignored; rerun this script after a clean checkout or a pjproject upgrade.
 #
 # Media profile: null sound device only (no Android audio backend is compiled in, so pjsua never
-# touches AudioManager), no video, no TLS yet, G.711 + G.722 + bundled libsrtp.
+# touches AudioManager), no video, G.711 + G.722 + bundled libsrtp. TLS/DTLS via a static OpenSSL
+# LTS build linked into libpjsua2.so.
 set -euo pipefail
 
 PJ_VERSION=2.17
 PJ_SHA256=065fe06c06788d97c35f563796d59f00ce52fe9558a52d7b490a042a966facce
+OSSL_VERSION=3.5.8
+OSSL_SHA256=a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2
 ABIS=${ABIS:-arm64-v8a}
 APP_PLATFORM=${APP_PLATFORM:-android-34}
 
@@ -28,6 +31,16 @@ if [ ! -f "$TARBALL" ]; then
   mv "$TARBALL.part" "$TARBALL"
 fi
 echo "$PJ_SHA256  $TARBALL" | shasum -a 256 -c -
+OSSL_TARBALL="$WORK/openssl-$OSSL_VERSION.tar.gz"
+if [ ! -f "$OSSL_TARBALL" ]; then
+  curl -fsSL -o "$OSSL_TARBALL.part" \
+    "https://github.com/openssl/openssl/releases/download/openssl-$OSSL_VERSION/openssl-$OSSL_VERSION.tar.gz"
+  mv "$OSSL_TARBALL.part" "$OSSL_TARBALL"
+fi
+echo "$OSSL_SHA256  $OSSL_TARBALL" | shasum -a 256 -c -
+HOST_TAG=$(ls "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt" | head -1)
+API=${APP_PLATFORM#android-}
+JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
 GEN_JAVA="$MODULE/src/generated/java"
 GEN_LIBS="$MODULE/src/generated/jniLibs"
@@ -39,7 +52,27 @@ for ABI in $ABIS; do
   rm -rf "$WORK/$ABI"
   mkdir -p "$WORK/$ABI"
   tar xzf "$TARBALL" -C "$WORK/$ABI"
+
+  # Static OpenSSL for this ABI, installed into $WORK/$ABI/openssl.
+  case $ABI in
+    arm64-v8a) OSSL_TARGET=android-arm64 ;;
+    armeabi-v7a) OSSL_TARGET=android-arm ;;
+    x86_64) OSSL_TARGET=android-x86_64 ;;
+    x86) OSSL_TARGET=android-x86 ;;
+  esac
+  SSL_PREFIX="$WORK/$ABI/openssl"
+  tar xzf "$OSSL_TARBALL" -C "$WORK/$ABI"
+  (
+    cd "$WORK/$ABI/openssl-$OSSL_VERSION"
+    export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin:$PATH"
+    ./Configure "$OSSL_TARGET" -D__ANDROID_API__="$API" no-shared no-tests no-apps no-docs no-engine \
+      no-comp no-ssl3 no-weak-ssl-ciphers --prefix="$SSL_PREFIX" --openssldir=/nonexistent --libdir=lib
+    make -j"$JOBS" build_libs
+    make install_dev
+  )
   cp "$HERE/config_site.h" "$SRC/pjlib/include/pj/config_site.h"
+  # Accept "*." wildcard server certificates (RFC 6125); stock pjsip rejects them per RFC 5922.
+  patch -p1 -d "$SRC" < "$HERE/pjsip-tls-wildcard.patch"
   # Bulk byte[] <-> ByteVector copies; the stock binding is a List<Short> with one JNI call per byte.
   # Must precede %template(ByteVector), so it goes right after the and_string.i include.
   I="$SRC/pjsip-apps/src/swig/pjsua2.i"
@@ -50,14 +83,16 @@ for ABI in $ABIS; do
   (
     cd "$SRC"
     TARGET_ABI=$ABI APP_PLATFORM=$APP_PLATFORM ./configure-android --use-ndk-cflags \
-      --disable-sound --disable-video --disable-ssl --disable-upnp \
+      --with-ssl="$SSL_PREFIX" \
+      --disable-sound --disable-video --disable-upnp \
       --disable-opus --disable-silk --disable-bcg729 --disable-lyra --disable-opencore-amr \
       --disable-openh264 --disable-vpx --disable-ffmpeg --disable-v4l2 --disable-sdl \
       --disable-libyuv --disable-libwebrtc --disable-android-mediacodec \
       --disable-gsm-codec --disable-ilbc-codec --disable-speex-codec --disable-g7221-codec \
       --disable-l16-codec --disable-speex-aec
     make dep
-    make -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
+    grep -q "PJ_HAS_SSL_SOCK 1" pjlib/include/pj/compat/os_auto.h || { echo "SSL not enabled" >&2; exit 1; }
+    make -j"$JOBS"
     make -C pjsip-apps/src/swig/java
   )
 

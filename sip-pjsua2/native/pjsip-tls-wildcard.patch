@@ -1,0 +1,50 @@
+--- a/pjsip/src/pjsip/sip_transport_tls.c	2026-10-10 01:10:53
++++ b/pjsip/src/pjsip/sip_transport_tls.c	2026-10-10 01:11:05
+@@ -2005,7 +2005,29 @@
+ 
+ /* 
+  * Callback from ioqueue when asynchronous connect() operation completes.
++ */
++/* android-voice-sip-agent: RFC 6125 section 6.4.3 host name matching. A "*." wildcard in the
++ * left-most label matches exactly one label of a DNS name, as browsers and most SIP clients do;
++ * RFC 5922 forbids wildcards, but public CAs commonly issue only those. IP addresses never match
++ * a wildcard.
+  */
++static pj_bool_t tls_host_match(const pj_str_t *remote, const pj_str_t *cert_name)
++{
++    char *dot;
++    pj_str_t rest, suffix;
++
++    if (!pj_stricmp(remote, cert_name))
++        return PJ_TRUE;
++    if (cert_name->slen < 3 || cert_name->ptr[0] != '*' || cert_name->ptr[1] != '.')
++        return PJ_FALSE;
++    dot = (char*)pj_memchr(remote->ptr, '.', remote->slen);
++    if (!dot || dot == remote->ptr)
++        return PJ_FALSE;
++    pj_strset(&rest, dot, remote->slen - (dot - remote->ptr));
++    pj_strset(&suffix, cert_name->ptr + 1, cert_name->slen - 1);
++    return !pj_stricmp(&rest, &suffix);
++}
++
+ static pj_bool_t on_connect_complete(pj_ssl_sock_t *ssock,
+                                      pj_status_t status)
+ {
+@@ -2100,6 +2122,8 @@
+ 
+             switch (serv_cert->subj_alt_name.entry[i].type) {
+             case PJ_SSL_CERT_NAME_DNS:
++                matched = tls_host_match(remote_name, cert_name);
++                break;
+             case PJ_SSL_CERT_NAME_IP:
+                 matched = !pj_stricmp(remote_name, cert_name);
+                 break;
+@@ -2125,7 +2149,7 @@
+          * certificate, try with Common Name of Subject field.
+          */
+         if (!matched) {
+-            matched = !pj_stricmp(remote_name, &serv_cert->subject.cn);
++            matched = tls_host_match(remote_name, &serv_cert->subject.cn);
+         }
+ 
+         if (!matched) {

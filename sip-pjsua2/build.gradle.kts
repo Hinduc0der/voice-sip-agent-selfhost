@@ -28,6 +28,7 @@ android {
 
 dependencies {
     api(project(":voice-api"))
+    testImplementation(libs.junit)
 }
 
 val checkPjsua2 by tasks.registering {

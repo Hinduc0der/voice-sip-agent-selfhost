@@ -46,10 +46,14 @@ class PjsipEndpoint(
     private var serverAddrs: Set<InetAddress> = emptySet()
     private var rtpCheck: ScheduledFuture<*>? = null
     private var stopped = false
+    private var unregistered = false
 
-    private val hostPort = if (config.port == 5060) config.server else "${config.server}:${config.port}"
-    /** URIs use the domain; when that is the server itself, keep its port too. */
-    private val uriHost = if (config.domain == config.server) hostPort else config.domain
+    private val hostPort = if (config.port == config.transport.defaultPort) config.server else "${config.server}:${config.port}"
+    private val transportParam = if (config.transport == SipTransport.UDP) "" else ";transport=${config.transport.id}"
+    /** Over TCP/TLS, or when the domain is not the server, every request goes through the server as proxy. */
+    private val useProxy = config.transport != SipTransport.UDP || config.domain != config.server
+    /** URIs use the domain; when that is the server itself (and no proxy is used), keep its port too. */
+    private val uriHost = if (config.domain == config.server && !useProxy) hostPort else config.domain
     internal val aor = "sip:${config.username}@$uriHost"
     internal fun uriFor(user: String) = "sip:$user@$uriHost"
 
@@ -87,12 +91,19 @@ class PjsipEndpoint(
             rtpCheck?.cancel(false)
             calls.values.toList().forEach { it.doHangup(HangupCause.NORMAL) }
             account?.let { acc ->
-                // shutdown() unregisters and detaches; the Java wrapper must be freed explicitly.
+                // Wait for the unregister to complete: a successor account reuses the same Contact, and
+                // a late unregister would remove the binding it just refreshed.
+                if (status.ready) {
+                    runCatching { acc.setRegistration(false) }
+                    val deadline = System.currentTimeMillis() + 1500
+                    while (!unregistered && System.currentTimeMillis() < deadline) PjsuaLib.ep.libHandleEvents(20)
+                }
+                // shutdown() detaches from pjsua; the Java wrapper must be freed explicitly.
                 acc.shutdown()
                 acc.delete()
             }
             account = null
-            if (releaseTransport) PjsuaLib.closeUdpTransport(config.localPort)
+            if (releaseTransport) PjsuaLib.closeTransport(config.transport, config.localPort)
             setStatus(EndpointStatus(false, "stopped"))
             done.countDown()
         }
@@ -105,11 +116,14 @@ class PjsipEndpoint(
     }
 
     private fun createAccount() {
-        val tid = PjsuaLib.udpTransport(config.localPort)
+        if (config.transport != SipTransport.TLS && config.srtp != SrtpPolicy.OFF) {
+            log.info("SRTP ${config.srtp.id} ignored: needs TLS signalling, using plain RTP")
+        }
+        val tid = PjsuaLib.transport(config.transport, config.localPort)
         val ac = AccountConfig()
         ac.idUri = aor
         ac.regConfig.apply {
-            registrarUri = "sip:$hostPort"
+            registrarUri = "sip:$hostPort$transportParam"
             timeoutSec = config.registerExpiresSec.toLong()
             retryIntervalSec = 30
             firstRetryIntervalSec = 5
@@ -117,13 +131,18 @@ class PjsipEndpoint(
         ac.sipConfig.apply {
             authCreds.add(AuthCredInfo("digest", "*", config.authUsername, 0, config.password))
             transportId = tid
-            if (config.domain != config.server) proxies.add("sip:$hostPort;lr")
+            if (useProxy) proxies.add("sip:$hostPort$transportParam;lr")
         }
         ac.natConfig.apply {
             sipOutboundUse = 0
         }
         ac.mediaConfig.apply {
-            srtpUse = pjmedia_srtp_use.PJMEDIA_SRTP_DISABLED
+            srtpUse = when {
+                config.transport != SipTransport.TLS -> pjmedia_srtp_use.PJMEDIA_SRTP_DISABLED
+                config.srtp == SrtpPolicy.OPTIONAL -> pjmedia_srtp_use.PJMEDIA_SRTP_OPTIONAL
+                config.srtp == SrtpPolicy.MANDATORY -> pjmedia_srtp_use.PJMEDIA_SRTP_MANDATORY
+                else -> pjmedia_srtp_use.PJMEDIA_SRTP_DISABLED
+            }
             transportConfig.port = config.rtpPortStart.toLong()
             transportConfig.portRange = config.rtpPortCount.toLong()
         }
@@ -166,7 +185,10 @@ class PjsipEndpoint(
     // ------------------------------------------------------------ pjsua callbacks
 
     private fun onRegState(prm: OnRegStateParam) {
-        if (stopped) return
+        if (stopped) {
+            if (prm.expiration == 0L) unregistered = true
+            return
+        }
         val code = prm.code
         val ok = code / 100 == 2 && prm.expiration > 0
         val s = if (ok) EndpointStatus(true, "registered (pjsua2, ${prm.expiration}s)")
@@ -179,7 +201,7 @@ class PjsipEndpoint(
         val rdata = prm.rdata
         val src = rdata.srcAddress
         val msg = rdata.wholeMsg
-        val target = Invite.requestUser(msg)
+        val target = Invite.target(msg)
         val caller = Invite.caller(msg)
         val leg = PjsipCall(this, LegDirection.INBOUND, caller, target, "p${ids.getAndIncrement()}")
         val call = leg.GwCall(acc, prm.callId)
@@ -210,6 +232,13 @@ class PjsipEndpoint(
         return addr in serverAddrs
     }
 
+    companion object {
+        /** Passes pjsip's info-level log lines through (call/registration traces). Off by default. */
+        fun setVerboseLogging(on: Boolean) {
+            PjsuaLib.verbose = on
+        }
+    }
+
     internal inner class GwAccount : Account() {
         override fun onRegState(prm: OnRegStateParam) = this@PjsipEndpoint.onRegState(prm)
         override fun onIncomingCall(prm: OnIncomingCallParam) = onIncoming(this, prm)
@@ -220,7 +249,16 @@ class PjsipEndpoint(
 internal object Invite {
     private val USER = Regex("^[^ ]+ (?:sips?|tel):([^@;> ]+)")
 
-    /** User part of the Request-URI: the number the PBX wants us to dial. */
+    /** Header carrying the number to dial when the Request-URI user must stay the gateway's own AoR. */
+    const val DIAL_HEADER = "X-VSA-Dial"
+
+    /**
+     * The number the PBX wants us to dial: [DIAL_HEADER] if present (needed behind registrar-based
+     * proxies such as Flexisip, which route on the Request-URI user), else the Request-URI user.
+     */
+    fun target(msg: String): String? =
+        header(msg, DIAL_HEADER, null)?.takeIf { it.isNotBlank() } ?: requestUser(msg)
+
     fun requestUser(msg: String): String? = USER.find(msg.lineSequence().firstOrNull().orEmpty())?.groupValues?.get(1)
 
     fun caller(msg: String): Party {

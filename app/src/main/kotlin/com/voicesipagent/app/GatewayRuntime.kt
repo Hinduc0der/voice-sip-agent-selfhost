@@ -14,6 +14,8 @@ import com.voicesipagent.privileged.ShizukuConnector
 import com.voicesipagent.pjsua2.PjsipConfig
 import com.voicesipagent.pjsua2.PjsipEndpoint
 import com.voicesipagent.pjsua2.PjsipLog
+import com.voicesipagent.pjsua2.SipTransport
+import com.voicesipagent.pjsua2.SrtpPolicy
 import com.voicesipagent.sip.SipAccount
 import com.voicesipagent.sip.SipConfig
 import com.voicesipagent.sip.SipLog
@@ -162,6 +164,19 @@ class GatewayRuntime private constructor(context: Context) {
             _health.update { it.copy(sip = EndpointStatus(false, "not configured")) }
             return
         }
+        val transport = SipTransport.of(s.sipTransport)
+        val srtp = SrtpPolicy.of(s.srtp)
+        if (srtp == null) {
+            AppLog.w("unknown SRTP policy '${s.srtp}'")
+            _health.update { it.copy(sip = EndpointStatus(false, "unknown srtp ${s.srtp}")) }
+            return
+        }
+        PjsipEndpoint.setVerboseLogging(s.sipDebugLog)
+        if (transport == null || (s.sipStack == SipStack.BUILTIN && transport != SipTransport.UDP)) {
+            AppLog.w("SIP transport '${s.sipTransport}' not supported by the ${s.sipStack.id} stack")
+            _health.update { it.copy(sip = EndpointStatus(false, "transport ${s.sipTransport} unsupported by ${s.sipStack.id}")) }
+            return
+        }
         try {
             val ep: CallEndpoint = when (s.sipStack) {
                 SipStack.BUILTIN -> SipUserAgent(
@@ -185,6 +200,8 @@ class GatewayRuntime private constructor(context: Context) {
                     PjsipConfig(
                         server = s.server,
                         port = s.port,
+                        transport = transport,
+                        srtp = srtp,
                         username = s.username,
                         password = s.password,
                         domain = s.domain.ifBlank { s.server },
@@ -211,7 +228,10 @@ class GatewayRuntime private constructor(context: Context) {
             is PjsipEndpoint -> {
                 // Keep the SIP socket only if pjsua2 is about to take it over again.
                 val n = settings
-                s.stop(releaseTransport = !(n.takeover && n.sipStack == SipStack.PJSUA2 && n.localSipPort == s.config.localPort))
+                s.stop(
+                    releaseTransport = !(n.takeover && n.sipStack == SipStack.PJSUA2 && n.localSipPort == s.config.localPort &&
+                        SipTransport.of(n.sipTransport) == s.config.transport),
+                )
             }
         }
         sip = null
@@ -296,6 +316,13 @@ class GatewayRuntime private constructor(context: Context) {
         rebuildBridge()
     }
 
+    /** pjsip info-level logging; takes effect immediately, persisted for the next start. */
+    fun setSipDebugLog(on: Boolean) = worker.execute {
+        settingsStore.save(settings.copy(sipDebugLog = on).also { _settings.value = it })
+        PjsipEndpoint.setVerboseLogging(on)
+        AppLog.i("SIP debug log ${if (on) "on" else "off"}")
+    }
+
     /** Read at each call's audio setup, so no restart is needed. */
     fun setMuteEarpiece(on: Boolean) = worker.execute {
         settingsStore.save(settings.copy(muteEarpiece = on).also { _settings.value = it })
@@ -345,7 +372,8 @@ class GatewayRuntime private constructor(context: Context) {
             appendLine("takeover=${h.takeover} pendingOff=${h.takeoverOffPending} muteEarpiece=${settings.muteEarpiece}")
             appendLine("shizuku=${h.shizuku} (${h.shizukuDetail})")
             appendLine("privileged=${h.privileged} ${h.privilegedDetail}")
-            appendLine("sip=${h.sip.detail} ready=${h.sip.ready} stack=${settings.sipStack.id}")
+            appendLine("sip=${h.sip.detail} ready=${h.sip.ready} stack=${settings.sipStack.id} " +
+                "transport=${settings.sipTransport} srtp=${settings.srtp} debugLog=${settings.sipDebugLog}")
             appendLine("cellular=${cellular.status.detail} companionBound=${CellularEndpoint.isCompanionBound}")
             appendLine("loopback=${h.loopbackTest} session=${h.session}")
             shizuku.service?.let { appendLine("tap=${runCatching { it.audioStats() }.getOrDefault("?")}") }

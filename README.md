@@ -42,6 +42,11 @@ adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlRece
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op loopback --ez on true
 # SIP 实现：builtin（默认）或 pjsua2
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op sip-stack --es stack pjsua2
+# 经公网 SBC（如 Flexisip）：TLS 信令 + SDES-SRTP（仅 pjsua2；srtp = off | optional | mandatory）
+adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver \
+  --es op provision --es server sip.example.org --ei port 5061 --es transport tls --es domain sip.example.org --es srtp optional
+# pjsip info 级日志（开发调试用，默认关；错误/警告始终输出）
+adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op sip-debug --ez on true
 # 接管总开关：关闭后禁用 InCallService、撤销伴侣覆盖、注销 SIP，通话行为与未安装本 App 相同（通话中关闭则挂断后生效）
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op takeover --ez on false
 # 桥接期间静音本机听筒/麦克风（默认开；切到 MODE_CALL_REDIRECT，tap 关闭即恢复）
@@ -56,7 +61,13 @@ adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 网关在 PBX 上作为 **trunk** 接入（不是分机）：手机向 PBX 注册，PBX 侧的路由全部在 Inbound/Outbound Routes 中管理。
 
 - **蜂窝来电**：手机 INVITE `sip:<target>@pbx`，`target` 是 DID（如 `pixel11-gw`），带 `P-Asserted-Identity` 传主叫号码；PBX 用 Inbound Route 按 DID 分配（如转 302）。SIP 接听后才接听蜂窝来电。
-- **SIP 去电**：Outbound Route 经 trunk `PJSIP/$OUTNUM$@<trunk>` 呼叫网关，Request-URI 的用户部分即拨出号码；蜂窝 ACTIVE 后回 200 OK。紧急号码一律拒绝（403），`prefixes` 可限制允许拨出的号码前缀。
+- **SIP 去电**：PBX 呼叫网关，要拨的号码取自 `X-VSA-Dial` 头；没有该头时取 Request-URI 的用户部分（`PJSIP/$OUTNUM$@<trunk>` 直连时即号码）。蜂窝 ACTIVE 后回 200 OK。紧急号码一律拒绝（403），`prefixes` 可限制允许拨出的号码前缀。
+  - 中间隔着按注册表路由的代理（Flexisip 等）时，Request-URI 的用户部分必须保持网关自己的 AoR，否则代理按号码查注册必然 404；所以号码放进 `X-VSA-Dial`（见下方拨号方案）。
+
+### 传输与加密（pjsua2）
+
+- `transport`：`udp`（局域网）、`tcp`、`tls`。TLS 以 Android 系统 CA 库校验服务器证书链和主机名，仅 TLS 1.2/1.3；接受最左一级的 `*.` 通配证书（RFC 6125，原版 pjsip 按 RFC 5922 拒绝，见 `native/pjsip-tls-wildcard.patch`）。**信令不做降级**：TLS 失败只会注册失败并每 30 s 重试，不会退回明文。
+- `srtp`：仅在 TLS 下生效（明文信令里交换密钥没有意义）。`optional` 同时提供 RTP 与 SDES，对端不支持时退回 RTP；`mandatory` 不支持则 488。
 
 ### PBX 配置示例（IssabelPBX / FreePBX + chan_pjsip）
 
@@ -76,7 +87,9 @@ dtmf_mode=rfc4733
 direct_media=no
 rtp_symmetric=yes
 force_rport=yes
-rewrite_contact=yes
+rewrite_contact=no          ; 经 Flexisip 时 Contact 已由代理改写，不能再改
+media_encryption=sdes       ; 与 SRTP optional 配合；局域网明文 RTP 照常
+media_encryption_optimistic=yes
 trust_id_inbound=yes        ; 采信网关的 P-Asserted-Identity 作为主叫号码
 
 [pixel11-gw-auth]
@@ -92,8 +105,29 @@ remove_existing=yes         ; 手机换 IP/端口后立即接管注册
 qualify_frequency=60
 ```
 
+`extensions_custom.conf`（新增独立上下文；保持 Request-URI 为网关 AoR，号码放头里）：
+
+```ini
+[vsa-pixel11-gw-out]
+exten => _X.,1,Dial(PJSIP/pixel11-gw,,b(vsa-pixel11-gw-hdr^s^1(${EXTEN})))
+exten => _X.,n,Hangup(${HANGUPCAUSE})
+
+[vsa-pixel11-gw-hdr]
+exten => s,1,Set(PJSIP_HEADER(add,X-VSA-Dial)=${ARG1})
+exten => s,n,Return()
+```
+
 Web 后台：
 
-- **Trunk**：Custom，拨号串 `PJSIP/$OUTNUM$@pixel11-gw`。
+- **Trunk**：Custom，拨号串 `Local/$OUTNUM$@vsa-pixel11-gw-out`（局域网直连、无代理时也可直接用 `PJSIP/$OUTNUM$@pixel11-gw`）。
 - **Outbound Route**：前缀 `9#7#`、匹配 `X.`，走上述 trunk；须排在 `9.` 之类更宽的路由之前。
 - **Inbound Route**：DID `pixel11-gw` → 目标分机（如 302）。
+
+### 公网接入：Flexisip
+
+手机以 TLS 注册到 Flexisip（`sips:<domain>:5061`），Flexisip 按域名把请求经 WireGuard 转给 Asterisk，
+MediaRelay 中继媒体（SRTP 端到端在手机与 Asterisk 之间，中继不解密）。Flexisip 不需要为网关做任何专门配置：
+
+- REGISTER 由 Asterisk 鉴权（Flexisip 的 Authentication 关闭、`reg-on-response=true`）；`ContactRouteInserter` 把 Contact 改写成指向 Flexisip，NatHelper 修正 NAT 地址，来电沿手机已建立的 TLS 连接（`fs-conn-id`）送达，手机无需开放端口。
+- Asterisk 发回的请求由 Router 按 Request-URI 的用户部分查注册表，所以 trunk 去电必须用上面的 `X-VSA-Dial` 方案。
+- 手机配置：`server=domain=<flexisip 域名>`、`port=5061`、`transport=tls`、`srtp=optional`。

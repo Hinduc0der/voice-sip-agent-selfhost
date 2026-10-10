@@ -272,7 +272,10 @@ class SipUserAgent(
 
     private fun onNewInvite(req: SipRequest, tx: ServerTransaction) {
         val handler = incomingHandler
-        val target = SipUri.parse(req.uri)?.user ?: req.to?.sipUri?.user
+        // X-VSA-Dial: the number to dial when the PBX keeps the Request-URI user as our own AoR
+        // (needed behind registrar-based proxies such as Flexisip).
+        val target = req.headers["X-VSA-Dial"]?.trim()?.takeIf { it.isNotEmpty() }
+            ?: SipUri.parse(req.uri)?.user ?: req.to?.sipUri?.user
         val pai = req.headers["P-Asserted-Identity"]?.let(NameAddr::parse)
         val fromAddr = req.from!!
         val caller = Party(
