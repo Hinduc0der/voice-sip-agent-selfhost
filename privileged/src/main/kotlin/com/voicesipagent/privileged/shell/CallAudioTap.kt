@@ -84,15 +84,29 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
 
     private fun openRedirected() {
         val pstn = runCatching { AudioManager::class.java.getField("CALL_REDIRECT_PSTN").getInt(null) }.getOrDefault(1)
+        val int = Int::class.javaPrimitiveType
+        // Attributes must match the AudioManager helpers exactly: without them the record falls back to the
+        // mic and the track to media playback on the local speaker, and nothing reaches the call.
+        val recAttr = AudioAttributes.Builder().also {
+            AudioAttributes.Builder::class.java.getMethod("setInternalCapturePreset", int)
+                .invoke(it, MediaRecorder.AudioSource.VOICE_DOWNLINK)
+        }.build()
         val rb = AudioRecord.Builder().setContext(ctx).setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO))
-        AudioRecord.Builder::class.java.getMethod("setCallRedirectionMode", Int::class.javaPrimitiveType).invoke(rb, pstn)
+        AudioRecord.Builder::class.java.getMethod("setAudioAttributes", AudioAttributes::class.java).invoke(rb, recAttr)
+        AudioRecord.Builder::class.java.getMethod("setCallRedirectionMode", int).invoke(rb, pstn)
         record = rb.build()
         check(record.state == AudioRecord.STATE_INITIALIZED) { "PSTN record not initialized" }
         try {
-            val tb = AudioTrack.Builder().setContext(ctx).setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
-            AudioTrack.Builder::class.java.getMethod("setCallRedirectionMode", Int::class.javaPrimitiveType).invoke(tb, pstn)
+            val trackAttr = AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).also {
+                AudioAttributes.Builder::class.java.getMethod("setSystemUsage", int).invoke(it, USAGE_CALL_ASSISTANT)
+            }.build()
+            val tb = AudioTrack.Builder().setContext(ctx).setAudioAttributes(trackAttr)
+                .setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
+            AudioTrack.Builder::class.java.getMethod("setCallRedirectionMode", int).invoke(tb, pstn)
             track = tb.build()
             check(track.state == AudioTrack.STATE_INITIALIZED) { "PSTN track not initialized" }
+            Log.i(TAG, "redirected: record src=${record.audioSource} dev=${record.routedDevice?.type} " +
+                "track usage=${track.audioAttributes.usage}")
         } catch (t: Throwable) {
             record.release()
             throw t
@@ -227,5 +241,7 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
         const val RATE = 8000
         const val FRAME = 320
         private const val VOICE_THRESHOLD = 300
+        /** Hidden AudioAttributes.USAGE_CALL_ASSISTANT, as used by getCallUplinkInjectionAudioTrack. */
+        private const val USAGE_CALL_ASSISTANT = 17
     }
 }
