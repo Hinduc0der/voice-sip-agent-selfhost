@@ -33,7 +33,7 @@
 adb install -r -g app/build/outputs/apk/debug/app-debug.apk
 # 配置 SIP（只有 shell 能发送：receiver 受 DUMP 权限保护）
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver \
-  --es op provision --es server <pbx> --ei port 5066 --es user 401 --es password '<secret>' --es target 302
+  --es op provision --es server <pbx> --ei port 5066 --es user pixel11-gw --es password '<secret>' --es target pixel11-gw
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op status
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op loopback --ez on true
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
@@ -43,5 +43,47 @@ adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 
 ## 呼叫路由
 
-- **蜂窝来电**：手机 INVITE `sip:<target>@pbx`（默认 302），带 `P-Asserted-Identity` 传主叫号码；SIP 接听后才接听蜂窝来电。
-- **SIP 去电**：Asterisk 用 `Dial(PJSIP/<号码>@401)` 呼叫网关，Request-URI 中的用户部分即拨出号码；蜂窝 ACTIVE 后回 200 OK。紧急号码一律拒绝（403）。
+网关在 PBX 上作为 **trunk** 接入（不是分机）：手机向 PBX 注册，PBX 侧的路由全部在 Inbound/Outbound Routes 中管理。
+
+- **蜂窝来电**：手机 INVITE `sip:<target>@pbx`，`target` 是 DID（如 `pixel11-gw`），带 `P-Asserted-Identity` 传主叫号码；PBX 用 Inbound Route 按 DID 分配（如转 302）。SIP 接听后才接听蜂窝来电。
+- **SIP 去电**：Outbound Route 经 trunk `PJSIP/$OUTNUM$@<trunk>` 呼叫网关，Request-URI 的用户部分即拨出号码；蜂窝 ACTIVE 后回 200 OK。紧急号码一律拒绝（403），`prefixes` 可限制允许拨出的号码前缀。
+
+### PBX 配置示例（IssabelPBX / FreePBX + chan_pjsip）
+
+`pjsip_custom_post.conf`：
+
+```ini
+[pixel11-gw]
+type=endpoint
+transport=transport-udp
+context=from-trunk          ; 来电按 Inbound Route 处理，不具备内部分机权限
+aors=pixel11-gw
+auth=pixel11-gw-auth
+identify_by=username
+disallow=all
+allow=ulaw,alaw
+dtmf_mode=rfc4733
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+trust_id_inbound=yes        ; 采信网关的 P-Asserted-Identity 作为主叫号码
+
+[pixel11-gw-auth]
+type=auth
+auth_type=userpass
+username=pixel11-gw
+password=<secret>
+
+[pixel11-gw]
+type=aor
+max_contacts=1
+remove_existing=yes         ; 手机换 IP/端口后立即接管注册
+qualify_frequency=60
+```
+
+Web 后台：
+
+- **Trunk**：Custom，拨号串 `PJSIP/$OUTNUM$@pixel11-gw`。
+- **Outbound Route**：前缀 `9#7#`、匹配 `X.`，走上述 trunk；须排在 `9.` 之类更宽的路由之前。
+- **Inbound Route**：DID `pixel11-gw` → 目标分机（如 302）。
