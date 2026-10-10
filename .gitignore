@@ -1,0 +1,21 @@
+# Secrets — never commit
+sip_secret
+*.secret
+secrets/
+
+# Gradle / Android
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+.kotlin/
