@@ -19,7 +19,11 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -39,6 +43,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.voicesipagent.pjsua2.SipTransport
+import com.voicesipagent.pjsua2.SrtpPolicy
 import com.voicesipagent.privileged.HealthKeys
 import com.voicesipagent.privileged.ShizukuConnector
 
@@ -121,9 +127,28 @@ private fun SettingsSection(rt: GatewayRuntime) {
     var password by remember(cur) { mutableStateOf(cur.password) }
     var target by remember(cur) { mutableStateOf(cur.inboundTarget) }
     var prefixes by remember(cur) { mutableStateOf(cur.allowedPrefixes) }
+    var domain by remember(cur) { mutableStateOf(cur.domain) }
+    var stack by remember(cur) { mutableStateOf(cur.sipStack) }
+    var transport by remember(cur) { mutableStateOf(SipTransport.of(cur.sipTransport) ?: SipTransport.UDP) }
+    var srtp by remember(cur) { mutableStateOf(SrtpPolicy.of(cur.srtp) ?: SrtpPolicy.OPTIONAL) }
+    val builtin = stack == SipStack.BUILTIN
     Section("Settings") {
+        Choice("SIP stack", SipStack.entries, stack, { it.id }) {
+            stack = it
+            // The built-in stack is UDP only.
+            if (it == SipStack.BUILTIN) transport = SipTransport.UDP
+        }
+        Choice("Transport", SipTransport.entries, transport, { it.id }, enabled = { !builtin || it == SipTransport.UDP }) {
+            // Follow the default port when it was still the previous transport's default.
+            if (port == transport.defaultPort.toString()) port = it.defaultPort.toString()
+            transport = it
+        }
+        Choice("SRTP (TLS only)", SrtpPolicy.entries, srtp, { it.id }, enabled = { !builtin && transport == SipTransport.TLS }) {
+            srtp = it
+        }
         Field("PBX host", server) { server = it }
         Field("PBX port", port, KeyboardType.Number) { port = it }
+        Field("SIP domain (empty = PBX host)", domain) { domain = it }
         Field("Extension / user", user) { user = it }
         OutlinedTextField(
             value = password, onValueChange = { password = it }, label = { Text("Password") },
@@ -134,11 +159,40 @@ private fun SettingsSection(rt: GatewayRuntime) {
         Button(onClick = {
             rt.applySettings(
                 cur.copy(
-                    server = server, port = port.toIntOrNull() ?: 5060, username = user, password = password,
-                    inboundTarget = target, allowedPrefixes = prefixes,
+                    server = server, port = port.toIntOrNull() ?: transport.defaultPort, username = user, password = password,
+                    inboundTarget = target, allowedPrefixes = prefixes, domain = domain,
+                    sipStack = stack, sipTransport = transport.id, srtp = srtp.id,
                 ),
             )
         }) { Text("Save & apply") }
+        Toggle("pjsip debug log", cur.sipDebugLog, { rt.setSipDebugLog(it) }) {
+            "Info-level pjsip lines in the log (numbers masked); applies immediately"
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun <T> Choice(
+    label: String,
+    options: List<T>,
+    selected: T,
+    name: (T) -> String,
+    enabled: (T) -> Boolean = { true },
+    onSelect: (T) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.bodySmall)
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            options.forEachIndexed { i, opt ->
+                SegmentedButton(
+                    selected = opt == selected,
+                    onClick = { onSelect(opt) },
+                    enabled = enabled(opt),
+                    shape = SegmentedButtonDefaults.itemShape(i, options.size),
+                ) { Text(name(opt)) }
+            }
+        }
     }
 }
 
