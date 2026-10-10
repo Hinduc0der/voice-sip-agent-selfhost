@@ -29,11 +29,26 @@ data class GatewaySettings(
     val allowedPrefixes: String = "",
     val busyPolicy: BusyPolicy = BusyPolicy.REJECT,
     val audioMethod: Int = AudioMethod.AUTO,
+    /** Which SIP implementation backs the PBX side. */
+    val sipStack: SipStack = SipStack.BUILTIN,
 ) {
     val sipConfigured: Boolean get() = server.isNotBlank() && username.isNotBlank() && password.isNotEmpty()
 
     override fun toString() =
-        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece server=$server:$port user=$username target=$inboundTarget)"
+        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece stack=$sipStack server=$server:$port user=$username target=$inboundTarget)"
+}
+
+enum class SipStack(val id: String) {
+    /** The hand-written Kotlin stack in :sip. */
+    BUILTIN("builtin"),
+
+    /** pjsip's pjsua2 via :sip-pjsua2. */
+    PJSUA2("pjsua2"),
+    ;
+
+    companion object {
+        fun of(id: String?): SipStack? = entries.firstOrNull { it.id == id }
+    }
 }
 
 /** SharedPreferences, with the SIP password sealed by an Android Keystore AES-GCM key. */
@@ -53,6 +68,7 @@ class SettingsStore(context: Context) {
         allowedPrefixes = prefs.getString("allowed_prefixes", "")!!,
         busyPolicy = runCatching { BusyPolicy.valueOf(prefs.getString("busy_policy", "REJECT")!!) }.getOrDefault(BusyPolicy.REJECT),
         audioMethod = prefs.getInt("audio_method", AudioMethod.AUTO),
+        sipStack = SipStack.of(prefs.getString("sip_stack", null)) ?: SipStack.BUILTIN,
     )
 
     fun save(s: GatewaySettings) {
@@ -69,6 +85,7 @@ class SettingsStore(context: Context) {
             .putString("allowed_prefixes", s.allowedPrefixes.trim())
             .putString("busy_policy", s.busyPolicy.name)
             .putInt("audio_method", s.audioMethod)
+            .putString("sip_stack", s.sipStack.id)
             .apply()
     }
 

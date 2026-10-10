@@ -11,6 +11,9 @@ import com.voicesipagent.gateway.EchoEndpoint
 import com.voicesipagent.gateway.GatewayConfig
 import com.voicesipagent.privileged.HealthKeys
 import com.voicesipagent.privileged.ShizukuConnector
+import com.voicesipagent.pjsua2.PjsipConfig
+import com.voicesipagent.pjsua2.PjsipEndpoint
+import com.voicesipagent.pjsua2.PjsipLog
 import com.voicesipagent.sip.SipAccount
 import com.voicesipagent.sip.SipConfig
 import com.voicesipagent.sip.SipLog
@@ -68,11 +71,16 @@ class GatewayRuntime private constructor(context: Context) {
     val cellular = CellularEndpoint(app, PrivilegedAudioOpener(shizuku, { settings.audioMethod }, { settings.muteEarpiece })) {
         AppLog.i(it)
     }
-    private var sip: SipUserAgent? = null
+    /** [SipUserAgent] or [PjsipEndpoint], per [GatewaySettings.sipStack]. */
+    private var sip: CallEndpoint? = null
     private var bridge: CallBridge? = null
     private var started = false
 
     private val sipLog = object : SipLog {
+        override fun info(msg: String) = AppLog.i("sip: $msg")
+        override fun warn(msg: String, t: Throwable?) = AppLog.w("sip: $msg", t)
+    }
+    private val pjLog = object : PjsipLog {
         override fun info(msg: String) = AppLog.i("sip: $msg")
         override fun warn(msg: String, t: Throwable?) = AppLog.w("sip: $msg", t)
     }
@@ -144,8 +152,7 @@ class GatewayRuntime private constructor(context: Context) {
     // ------------------------------------------------------------ SIP
 
     private fun startSip() {
-        sip?.stop()
-        sip = null
+        stopSip()
         val s = settings
         if (!s.takeover) {
             _health.update { it.copy(sip = EndpointStatus(false, "takeover off")) }
@@ -155,27 +162,65 @@ class GatewayRuntime private constructor(context: Context) {
             _health.update { it.copy(sip = EndpointStatus(false, "not configured")) }
             return
         }
-        val ua = SipUserAgent(
-            SipConfig(
-                account = SipAccount(
-                    server = s.server,
-                    port = s.port,
-                    username = s.username,
-                    password = s.password,
-                    domain = s.domain.ifBlank { s.server },
-                    displayName = "gateway",
-                ),
-                localPort = s.localSipPort,
-            ),
-            sipLog,
-        )
-        ua.addStatusListener { _, st -> _health.update { it.copy(sip = st) } }
         try {
-            ua.start()
-            sip = ua
-        } catch (e: Exception) {
+            val ep: CallEndpoint = when (s.sipStack) {
+                SipStack.BUILTIN -> SipUserAgent(
+                    SipConfig(
+                        account = SipAccount(
+                            server = s.server,
+                            port = s.port,
+                            username = s.username,
+                            password = s.password,
+                            domain = s.domain.ifBlank { s.server },
+                            displayName = "gateway",
+                        ),
+                        localPort = s.localSipPort,
+                    ),
+                    sipLog,
+                ).also { ua ->
+                    ua.addStatusListener { _, st -> _health.update { it.copy(sip = st) } }
+                    ua.start()
+                }
+                SipStack.PJSUA2 -> PjsipEndpoint(
+                    PjsipConfig(
+                        server = s.server,
+                        port = s.port,
+                        username = s.username,
+                        password = s.password,
+                        domain = s.domain.ifBlank { s.server },
+                        displayName = "gateway",
+                        localPort = s.localSipPort,
+                    ),
+                    pjLog,
+                ).also { pj ->
+                    pj.addStatusListener { _, st -> _health.update { it.copy(sip = st) } }
+                    pj.start()
+                }
+            }
+            sip = ep
+            AppLog.i("SIP stack: ${s.sipStack.id}")
+        } catch (e: Throwable) {
             AppLog.w("SIP start failed", e)
             _health.update { it.copy(sip = EndpointStatus(false, "start failed: ${e.message}")) }
+        }
+    }
+
+    private fun stopSip() {
+        when (val s = sip) {
+            is SipUserAgent -> s.stop()
+            is PjsipEndpoint -> {
+                // Keep the SIP socket only if pjsua2 is about to take it over again.
+                val n = settings
+                s.stop(releaseTransport = !(n.takeover && n.sipStack == SipStack.PJSUA2 && n.localSipPort == s.config.localPort))
+            }
+        }
+        sip = null
+    }
+
+    private fun refreshSipRegistration() {
+        when (val s = sip) {
+            is SipUserAgent -> s.refreshRegistration()
+            is PjsipEndpoint -> s.refreshRegistration()
         }
     }
 
@@ -188,7 +233,7 @@ class GatewayRuntime private constructor(context: Context) {
                 if (addrs != lastAddrs) {
                     if (lastAddrs != null) {
                         AppLog.i("network addresses changed; re-registering")
-                        sip?.refreshRegistration()
+                        worker.execute(::refreshSipRegistration)
                     }
                     lastAddrs = addrs
                 }
@@ -300,7 +345,7 @@ class GatewayRuntime private constructor(context: Context) {
             appendLine("takeover=${h.takeover} pendingOff=${h.takeoverOffPending} muteEarpiece=${settings.muteEarpiece}")
             appendLine("shizuku=${h.shizuku} (${h.shizukuDetail})")
             appendLine("privileged=${h.privileged} ${h.privilegedDetail}")
-            appendLine("sip=${h.sip.detail} ready=${h.sip.ready}")
+            appendLine("sip=${h.sip.detail} ready=${h.sip.ready} stack=${settings.sipStack.id}")
             appendLine("cellular=${cellular.status.detail} companionBound=${CellularEndpoint.isCompanionBound}")
             appendLine("loopback=${h.loopbackTest} session=${h.session}")
             shizuku.service?.let { appendLine("tap=${runCatching { it.audioStats() }.getOrDefault("?")}") }

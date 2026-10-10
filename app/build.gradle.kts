@@ -39,6 +39,7 @@ android {
 dependencies {
     implementation(project(":voice-api"))
     implementation(project(":sip"))
+    implementation(project(":sip-pjsua2"))
     implementation(project(":gateway"))
     implementation(project(":telephony"))
     implementation(project(":privileged"))

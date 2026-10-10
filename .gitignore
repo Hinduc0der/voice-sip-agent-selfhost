@@ -13,6 +13,9 @@ captures/
 .externalNativeBuild/
 .cxx/
 
+# pjsua2 binding produced by sip-pjsua2/native/build-pjsua2.sh
+sip-pjsua2/src/generated/
+
 # IDE
 .idea/
 *.iml

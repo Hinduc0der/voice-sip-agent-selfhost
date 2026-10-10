@@ -10,6 +10,7 @@ import android.content.Intent
  *   ... --es op provision --es server 192.168.0.53 --ei port 5066 --es user 401 --es password '***' [--es target 302]
  *   ... --es op setup | sip-restart | loopback --ez on true | takeover --ez on false
  *   ... --es op earpiece-mute --ez on false
+ *   ... --es op sip-stack --es stack pjsua2|builtin
  */
 class AdbControlReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -21,6 +22,11 @@ class AdbControlReceiver : BroadcastReceiver() {
             "loopback" -> rt.setLoopbackTest(intent.getBooleanExtra("on", true))
             "takeover" -> rt.setTakeover(intent.getBooleanExtra("on", true))
             "earpiece-mute" -> rt.setMuteEarpiece(intent.getBooleanExtra("on", true))
+            "sip-stack" -> {
+                val stack = SipStack.of(intent.getStringExtra("stack"))
+                if (stack == null) AppLog.w("adb control: sip-stack needs --es stack builtin|pjsua2")
+                else rt.applySettings(rt.settings.copy(sipStack = stack))
+            }
             "provision" -> {
                 val cur = rt.settings
                 rt.applySettings(
