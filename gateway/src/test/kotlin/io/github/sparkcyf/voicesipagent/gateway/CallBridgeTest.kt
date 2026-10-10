@@ -30,14 +30,8 @@ class CallBridgeTest {
     @Before fun setUp() = build()
     @After fun tearDown() = bridge.stop()
 
-    /** Waits for the bridge thread to drain. */
-    private fun settle() {
-        repeat(3) {
-            val latch = java.util.concurrent.CountDownLatch(1)
-            Thread { Thread.sleep(20); latch.countDown() }.start()
-            latch.await()
-        }
-    }
+    /** Waits for the bridge thread to drain, including tasks posted by the tasks it ran. */
+    private fun settle() = repeat(3) { bridge.drain() }
 
     @Test
     fun cellularInboundToSipFullCall() {

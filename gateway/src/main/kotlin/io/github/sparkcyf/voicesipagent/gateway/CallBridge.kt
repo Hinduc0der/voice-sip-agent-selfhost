@@ -81,6 +81,11 @@ class CallBridge(
     fun addListener(l: BridgeListener) = listeners.addIfAbsent(l)
     fun removeListener(l: BridgeListener) = listeners.remove(l)
 
+    /** Blocks until every task posted so far has run (tests). */
+    internal fun drain() {
+        if (!executor.isShutdown) executor.submit {}.get()
+    }
+
     private fun post(block: () -> Unit) {
         if (executor.isShutdown) return
         executor.execute {
