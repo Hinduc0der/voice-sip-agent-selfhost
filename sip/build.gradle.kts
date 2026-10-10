@@ -17,7 +17,7 @@ tasks.register<JavaExec>("sipProbe") {
     group = "verification"
     description = "Registers against the PBX in sip_secret and runs a live call test."
     classpath = sourceSets["test"].runtimeClasspath
-    mainClass.set("com.voicesipagent.sip.SipProbeKt")
+    mainClass.set("io.github.sparkcyf.voicesipagent.sip.SipProbeKt")
     args = providers.gradleProperty("probeArgs").getOrElse("echo").split(" ")
     systemProperty("sip.secret", rootProject.file("sip_secret").absolutePath)
 }

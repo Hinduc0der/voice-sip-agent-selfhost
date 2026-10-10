@@ -4,21 +4,35 @@ plugins {
 }
 
 android {
-    namespace = "com.voicesipagent.app"
+    namespace = "io.github.sparkcyf.voicesipagent.app"
     compileSdk {
         version = release(37)
     }
 
     defaultConfig {
-        applicationId = "com.voicesipagent"
+        applicationId = "io.github.sparkcyf.voicesipagent"
         minSdk = 34
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
     }
 
+    // Release signing comes from ~/.gradle/gradle.properties (never from the repo); without it the
+    // release APK is built unsigned.
+    val signingProps = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+        .associateWith { providers.gradleProperty("vsa.signing.$it").orNull }
+    val releaseSigning = if (signingProps.values.all { it != null }) {
+        signingConfigs.create("release") {
+            storeFile = file(signingProps.getValue("storeFile")!!)
+            storePassword = signingProps["storePassword"]
+            keyAlias = signingProps["keyAlias"]
+            keyPassword = signingProps["keyPassword"]
+        }
+    } else null
+
     buildTypes {
         release {
+            signingConfig = releaseSigning
             optimization {
                 enable = false
             }

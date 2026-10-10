@@ -34,7 +34,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps a SIP registration alive to bridge cellular calls to a LAN PBX" />
+                android:value="Keeps a SIP registration alive to bridge cellular calls to a PBX" />
         </service>
 
         <receiver

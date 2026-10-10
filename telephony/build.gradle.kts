@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.voicesipagent.telephony"
+    namespace = "io.github.sparkcyf.voicesipagent.telephony"
     compileSdk {
         version = release(37)
     }

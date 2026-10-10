@@ -9,7 +9,7 @@
         <!-- Companion InCallService: Telecom binds it alongside the stock dialer UI.
              No IN_CALL_SERVICE_UI meta-data, so the Google Phone app stays the visible UI. -->
         <service
-            android:name="com.voicesipagent.telephony.GatewayInCallService"
+            android:name="io.github.sparkcyf.voicesipagent.telephony.GatewayInCallService"
             android:exported="true"
             android:permission="android.permission.BIND_INCALL_SERVICE">
             <intent-filter>

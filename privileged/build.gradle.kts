@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.voicesipagent.privileged"
+    namespace = "io.github.sparkcyf.voicesipagent.privileged"
     compileSdk {
         version = release(37)
     }

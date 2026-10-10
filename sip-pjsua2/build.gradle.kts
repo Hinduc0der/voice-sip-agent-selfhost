@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.voicesipagent.pjsua2"
+    namespace = "io.github.sparkcyf.voicesipagent.pjsua2"
     compileSdk {
         version = release(37)
     }
