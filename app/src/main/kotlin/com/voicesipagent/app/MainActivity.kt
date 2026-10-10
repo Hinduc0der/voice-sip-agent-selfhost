@@ -102,13 +102,14 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier) {
 
 @Composable
 private fun SettingsSection(rt: GatewayRuntime) {
-    val cur = rt.settings
-    var server by remember { mutableStateOf(cur.server) }
-    var port by remember { mutableStateOf(cur.port.toString()) }
-    var user by remember { mutableStateOf(cur.username) }
-    var password by remember { mutableStateOf(cur.password) }
-    var target by remember { mutableStateOf(cur.inboundTarget) }
-    var prefixes by remember { mutableStateOf(cur.allowedPrefixes) }
+    // Re-seed the form whenever settings change elsewhere (e.g. adb provisioning).
+    val cur by rt.settingsFlow.collectAsState()
+    var server by remember(cur) { mutableStateOf(cur.server) }
+    var port by remember(cur) { mutableStateOf(cur.port.toString()) }
+    var user by remember(cur) { mutableStateOf(cur.username) }
+    var password by remember(cur) { mutableStateOf(cur.password) }
+    var target by remember(cur) { mutableStateOf(cur.inboundTarget) }
+    var prefixes by remember(cur) { mutableStateOf(cur.allowedPrefixes) }
     Section("Settings") {
         Field("PBX host", server) { server = it }
         Field("PBX port", port, KeyboardType.Number) { port = it }
@@ -121,7 +122,7 @@ private fun SettingsSection(rt: GatewayRuntime) {
         Field("Allowed dial-out prefixes (comma separated, empty = any)", prefixes) { prefixes = it }
         Button(onClick = {
             rt.applySettings(
-                rt.settings.copy(
+                cur.copy(
                     server = server, port = port.toIntOrNull() ?: 5060, username = user, password = password,
                     inboundTarget = target, allowedPrefixes = prefixes,
                 ),

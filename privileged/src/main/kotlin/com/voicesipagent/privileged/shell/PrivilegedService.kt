@@ -112,8 +112,8 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
 
     private fun companionOverridden(pkg: String): Boolean {
         val out = ShellEnv.run("dumpsys", "telecom", timeoutSec = 15).out
-        // The override list is printed as "DefaultCallCompanionApps: [pkg, ...]" or similar.
-        return out.lineSequence().any { it.contains("ompanion", ignoreCase = false) && it.contains(pkg) }
+        // Printed as "DefaultCallCompanionApps: (override <pkg>)".
+        return out.lineSequence().any { it.contains("DefaultCallCompanionApps") && it.contains(pkg) }
     }
 
     private fun dozeAllowlisted(pkg: String) =

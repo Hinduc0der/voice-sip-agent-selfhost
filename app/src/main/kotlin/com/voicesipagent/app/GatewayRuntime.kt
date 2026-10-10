@@ -52,7 +52,9 @@ class GatewayRuntime private constructor(context: Context) {
     private val app = context.applicationContext
     private val worker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "gateway-runtime").apply { isDaemon = true } }
     val settingsStore = SettingsStore(app)
-    @Volatile var settings: GatewaySettings = settingsStore.load(); private set
+    private val _settings = MutableStateFlow(settingsStore.load())
+    val settingsFlow: StateFlow<GatewaySettings> = _settings
+    val settings: GatewaySettings get() = _settings.value
 
     private val _health = MutableStateFlow(HealthState())
     val health: StateFlow<HealthState> = _health
@@ -218,7 +220,7 @@ class GatewayRuntime private constructor(context: Context) {
 
     fun applySettings(new: GatewaySettings) = worker.execute {
         settingsStore.save(new)
-        settings = new
+        _settings.value = new
         AppLog.i("settings saved ($new)")
         startSip()
         rebuildBridge()
