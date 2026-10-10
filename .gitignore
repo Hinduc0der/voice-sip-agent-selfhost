@@ -3,6 +3,9 @@ sip_secret
 *.secret
 secrets/
 
+# Machine-specific agent notes (devices, PBX hosts)
+CLAUDE.local.md
+
 # Gradle / Android
 .gradle/
 build/

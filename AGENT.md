@@ -1,95 +1,157 @@
 # AGENT.md
 
 This file provides guidance to coding agents (Claude Code etc.) when working with code in this repository.
+Machine-specific notes (devices, PBX hosts, current configuration) belong in the git-ignored `CLAUDE.local.md`.
 
-与用户讨论请使用中文；代码、注释、commit message 用英文。
+Code, comments and commit messages are in English.
 
-## 项目概况
+## Project overview
 
-把一台**未 root** 的 Android 手机（Pixel 11 Pro / Android 17）变成单线 **蜂窝 ↔ SIP 网关**，以 trunk 方式接入 Asterisk（IssabelPBX）。特权操作通过 **Shizuku（shell uid 2000）** 完成；SIP 侧有两套可切换实现：自研纯 Kotlin（`:sip`，仅 UDP）和 pjsip 2.17 的 pjsua2（`:sip-pjsua2`，UDP/TCP/TLS + SDES-SRTP，当前手机使用这一套）。设计依据与实验记录在 `../AirSIM/sip-gateway-notes`（DESIGN.md、tools/probe）。
+Turns an **unrooted** Android phone into a single-line **cellular ↔ SIP gateway** that registers to a PBX
+(Asterisk / FreePBX / IssabelPBX) as a trunk. Privileged operations run through **Shizuku (shell uid 2000)**.
+The SIP side has two interchangeable implementations: a hand-written pure-Kotlin stack (`:sip`, UDP only) and
+pjsip 2.17's pjsua2 (`:sip-pjsua2`, UDP/TCP/TLS + SDES-SRTP, the default).
 
-已在真机验证：蜂窝来电 → PBX（DID `pixel11-gw` → 分机 302）、302 拨 `9#7#<号码>` 经手机外呼、双向语音、DTMF、Wi-Fi 断线重连（含通话中）、桥接期间本机听筒静音、"接管通话"总开关（以上用自研栈）；pjsua2 在局域网 UDP 和经公网 Flexisip（TLS + SRTP 实际生效）下两个方向的通话。尚未验证：Doze 长时间待机、长通话时钟漂移、通话等待、pjsua2 下的 DTMF 与断网重连、关掉 Wi-Fi 纯蜂窝数据的公网通话。
+Verified on a Pixel 11 Pro (Android 17) and a Motorola phone (Android 16): cellular inbound → PBX, PBX outbound
+via the phone, two-way audio, DTMF, Wi-Fi reconnect (also mid-call), handset muting while bridged, the takeover
+switch, overnight Doze standby, 15-minute calls without clock drift, and pjsua2 calls both on a LAN (UDP) and
+through a public Flexisip proxy (TLS + SRTP). Not yet verified: call waiting, DTMF and network-loss recovery under
+pjsua2, public calls over cellular data only (Wi-Fi off).
 
-## 常用命令
+## Common commands
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh                # 首次/升级时：编 OpenSSL 3.5.8 + pjproject 2.17（arm64），产物在 git 忽略的 src/generated/
-./gradlew test                                   # JVM 单元测试（:sip、:gateway）
-./gradlew :sip-pjsua2:testDebugUnitTest          # INVITE 解析等
-./gradlew :sip:test --tests 'com.voicesipagent.sip.SipMessageTest'          # 单个测试类
-./gradlew :gateway:test --tests 'com.voicesipagent.gateway.CallBridgeTest.cellularInboundToSipFullCall'
+sip-pjsua2/native/build-pjsua2.sh                # once / on upgrade: builds OpenSSL 3.5.8 + pjproject 2.17 (arm64) into git-ignored src/generated/
+./gradlew :sip:test :gateway:test                # JVM unit tests (no native build needed)
+./gradlew :sip-pjsua2:testDebugUnitTest          # INVITE parsing etc.
+./gradlew :sip:test --tests 'io.github.sparkcyf.voicesipagent.sip.SipMessageTest'          # single test class
+./gradlew :gateway:test --tests 'io.github.sparkcyf.voicesipagent.gateway.CallBridgeTest.cellularInboundToSipFullCall'
 ./gradlew :app:assembleDebug
-export ANDROID_SERIAL=<serial>             # zsh 不会对 A="adb -s …" 做分词，用环境变量
+./gradlew :app:assembleRelease                   # signed only if vsa.signing.* is set in ~/.gradle/gradle.properties
+export ANDROID_SERIAL=<serial>                   # zsh does not word-split A="adb -s …"; use the env var
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 
-adb 控制（receiver 受 DUMP 权限保护，只有 shell 能发；**组件名必须写全类名**，`.AdbControlReceiver` 会解析到不存在的类，广播静默丢弃）：
+adb control (the receiver is guarded by the DUMP permission, so only the shell can send to it; **always write the
+fully-qualified component name** — `.AdbControlReceiver` resolves to a non-existent class and the broadcast is
+silently dropped):
 
 ```bash
-R=com.voicesipagent/com.voicesipagent.app.AdbControlReceiver
-adb shell am broadcast -n $R --es op status            # 状态输出到 logcat（VoiceSipAgent）
+R=io.github.sparkcyf.voicesipagent/io.github.sparkcyf.voicesipagent.app.AdbControlReceiver
+adb shell am broadcast -n $R --es op status            # status goes to logcat (VoiceSipAgent)
 adb shell am broadcast -n $R --es op takeover --ez on false
 adb shell am broadcast -n $R --es op earpiece-mute --ez on true
-adb shell am broadcast -n $R --es op loopback --ez on true   # 来电回声测试，仅内存态，重装后复位
-adb shell am broadcast -n $R --es op provision --es user … --es password '…' --es target …   # 只覆盖给出的字段
+adb shell am broadcast -n $R --es op loopback --ez on true   # inbound echo test; in-memory only, reset on reinstall
+adb shell am broadcast -n $R --es op provision --es user … --es password '…' --es target …   # only overwrites the given fields
 adb shell am broadcast -n $R --es op setup | sip-restart
 adb shell am broadcast -n $R --es op sip-stack --es stack pjsua2|builtin
-adb shell am broadcast -n $R --es op provision --es transport tls --es srtp optional …   # transport/srtp 仅 pjsua2
-adb shell am broadcast -n $R --es op sip-debug --ez on true   # pjsip info 级日志，默认关（持久化）
-adb shell "am broadcast -n $R --es op provision --es prefixes ''"   # 空字符串参数要套一层引号，否则 am 报 Argument expected
+adb shell am broadcast -n $R --es op provision --es transport tls --es srtp optional …   # transport/srtp: pjsua2 only
+adb shell am broadcast -n $R --es op sip-debug --ez on true   # pjsip info-level logging, off by default (persisted)
+adb shell "am broadcast -n $R --es op provision --es prefixes ''"   # empty string args need an extra layer of quotes, or am says "Argument expected"
 ```
 
-当前手机配置：`server=domain=sip.example.org`、`port=5061`、`transport=tls`、`srtp=optional`、stack=pjsua2、sip-debug 关。
+`:sip:sipProbe` (`-PprobeArgs="echo *43 40"` / `"listen 60"`) registers against the PBX described in the
+git-ignored `sip_secret` and runs a live call test. Do not point it at the gateway's own trunk account: with
+`remove_existing=yes` it would kick the phone's registration.
 
-`:sip:sipProbe`（`-PprobeArgs="echo *43 40"` / `"listen 60"`）读取 git 忽略的 `sip_secret`，为当初的分机 401 写的。401 已删除；若改用 trunk 账号运行，会因 `remove_existing=yes` 顶掉手机的注册，且 `*43` 等内部功能码在 `from-trunk` 上下文不可达。
+Toolchain: Gradle 9.5.1 wrapper, AGP 9.3 (built-in Kotlin), Kotlin 2.2.10, compileSdk 37, minSdk 34,
+targetSdk 36; JVM modules use `jvmToolchain(17)`.
 
-工具链：Gradle 9.5.1 wrapper、AGP 9.3（内置 Kotlin）、Kotlin 2.2.10、compileSdk 37、minSdk 34、targetSdk 36；JVM 模块 `jvmToolchain(17)`。
+## Architecture
 
-## 架构
+Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on the host); `:telephony`,
+`:privileged`, `:sip-pjsua2` (Android); `:app` wires everything together.
 
-模块依赖方向：`:voice-api` ← `:sip`、`:gateway`（纯 JVM，可在主机上测）；`:telephony`、`:privileged`（Android）；`:app` 负责装配。
+- **Contract (`:voice-api`)**: `CallEndpoint` (`dial()` never throws; failures come back as an ENDED leg),
+  `CallLeg` (state only moves forward: NEW→PROCEEDING→RINGING→CONNECTED→ENDED), `MediaPort` (8 kHz mono PCM16,
+  20 ms = 160 samples = 320 bytes, `readFrame()` never blocks). A new voice/control integration = one more
+  `CallEndpoint`; the core does not change.
+- **`CallBridge` (`:gateway`)**: bridges any two endpoints. An inbound call on side A first dials side B, and
+  **A is answered only after B answers**; timeouts/failures map to a `HangupCause` rejection. `EchoEndpoint` is
+  for loopback tests.
+- **Single clock domain**: `MediaBridge` is driven by the port with `isClockSource` (the cellular tap, i.e. the
+  baseband clock); both directions follow that one clock. `RtpSession` has no clock and relies on its jitter
+  buffer. A 20 ms ticker is used only when there is no clock source.
+- **Cellular side (`:telephony`)**: the app is not the default dialer but a Telecom **companion InCallService**
+  (CALL_COMPANION_APP + MANAGE_ONGOING_CALLS appop + `cmd telecom add-or-remove-call-companion-app`).
+  `CellularEndpoint` only handles calls it owns: gateway inbound calls and calls it dialed itself (matched on the
+  last 8 digits). Calls the user dials manually and calls arriving while another call exists are left alone;
+  emergency numbers are refused fail-closed. Once a call is ACTIVE it is `setMuted(true)` and the audio tap is
+  opened (up to 5 retries).
+- **Privileged process (`:privileged`)**: a Shizuku UserService running in an app_process with shell uid 2000,
+  AIDL interface `IPrivilegedService`. Call audio is handed to the app over a **SOCK_SEQPACKET socketpair**
+  (one packet = one frame); the app side is `PcmSocketPort` (the clock source). The UserService `version` is the
+  APK's `lastUpdateTime`, so every reinstall restarts the shell process and loads the new code.
+- **SIP (`:sip`)**: UDP; all protocol state runs on a single `sip-ua` scheduler thread (`post {}`). Outbound calls
+  carry the caller number in `P-Asserted-Identity`; for inbound calls the cellular number to dial comes from the
+  `X-VSA-Dial` header, falling back to the Request-URI user part. PCMU/PCMA + telephone-event(101) only.
+- **SIP (`:sip-pjsua2`)**: `PjsipEndpoint` implements `CallEndpoint` with the same trunk semantics as `:sip`.
+  - pjsua is a process singleton: `PjsuaLib` is initialised once and never destroyed; restarting the endpoint only
+    adds/removes accounts, transports (keyed by type + port) are kept and reused. Every pjsua call and SIP callback
+    runs on a single `pjsua` thread (`threadCnt=0` + `mainThreadOnly`, looping over a task queue and
+    `libHandleEvents`).
+  - **No Android sound-device backend is compiled in** — only the null sound device, so pjsua never touches
+    AudioManager or the audio mode. Audio enters/leaves the conference bridge through `AudioMediaPort`
+    (`ConfPort`, 8 kHz / 20 ms, no resampling, no EC/VAD); a `FrameFifo` of at most 5 frames on each side absorbs
+    the drift between the two clocks.
+  - SWIG objects (Call/Account/AudioMediaPort) must be `delete()`d explicitly on the pjsua thread, and never from
+    inside their own callback (`finish()` defers the delete to the next loop). `Account`: `shutdown()` before
+    `delete()`.
+  - `stop()` waits for the un-REGISTER response (≤1.5 s): the new account reuses the same Contact, and a late
+    un-REGISTER would remove the new binding.
+  - Build patches (`native/`): `config_site.h`, `pjsua2-java-ext.i` (bulk-copy typemap for ByteVector; must come
+    before `%template(ByteVector)`; SWIG director threads stay attached), `pjsip-tls-wildcard.patch` (RFC 6125
+    wildcard certificate matching). pjsua's log callback is gated by `consoleLevel`, not just stdout.
+- **Runtime (`:app`)**: `GatewayRuntime` singleton; every state-changing operation runs on the single-threaded
+  `gateway-runtime` executor. It is started from `GatewayApp.onCreate` (Telecom may start the process just to bind
+  the InCallService). A health check runs every 60 s and re-runs setup if the companion override is lost.
+  Settings live in SharedPreferences; the SIP password is sealed with a Keystore AES-GCM key.
 
-- **解耦契约（`:voice-api`）**：`CallEndpoint`（`dial()` 永不抛异常，失败以 ENDED 的 leg 返回）、`CallLeg`（状态只能前进：NEW→PROCEEDING→RINGING→CONNECTED→ENDED）、`MediaPort`（8 kHz mono PCM16，20 ms = 160 样本 = 320 字节，`readFrame()` 不阻塞）。新语音/控制接入 = 实现一个 `CallEndpoint`，核心不改。
-- **`CallBridge`（`:gateway`）**：任意两个 endpoint 互桥。A 侧来电先 dial B 侧，**B 接听后才接听 A**；超时/失败映射为 `HangupCause` 拒接。`EchoEndpoint` 用于回环测试。
-- **单时钟域**：`MediaBridge` 由 `isClockSource` 的端口驱动（蜂窝 tap，即基带时钟），两个方向都跟这一个时钟走；`RtpSession` 无时钟，靠抖动缓冲吸收网络抖动。没有时钟源时才用 20 ms ticker。
-- **蜂窝侧（`:telephony`）**：App 不是默认拨号器，而是 Telecom **伴侣 InCallService**（CALL_COMPANION_APP + MANAGE_ONGOING_CALLS appop + `cmd telecom add-or-remove-call-companion-app`）。`CellularEndpoint` 只处理自己负责的通话：网关来电、自己拨出的去电（按号码后 8 位匹配）；用户手动拨打的、有其他通话时进来的一律不碰；紧急号码 fail-closed 拒绝。通话 ACTIVE 后 `setMuted(true)` 并打开音频 tap（最多重试 5 次）。
-- **特权进程（`:privileged`）**：Shizuku UserService，运行在 shell uid 2000 的 app_process 中，AIDL 接口 `IPrivilegedService`。通话音频以 **SOCK_SEQPACKET socketpair** 交给 App（一个包 = 一帧），App 侧为 `PcmSocketPort`（时钟源）。UserService 的 `version` 取自 APK `lastUpdateTime`，所以每次重装都会重启 shell 进程、加载新代码。
-- **SIP（`:sip`）**：UDP；所有协议状态都在单个 `sip-ua` 调度线程上执行（`post {}`）。外呼时带 `P-Asserted-Identity` 传主叫号码；来电时要拨的蜂窝号码取 `X-VSA-Dial` 头，没有则取 Request-URI 的 user 部分。只支持 PCMU/PCMA + telephone-event(101)。
-- **SIP（`:sip-pjsua2`）**：`PjsipEndpoint` 实现 `CallEndpoint`，trunk 语义与 `:sip` 相同。要点：
-  - pjsua 是进程单例，`PjsuaLib` 只初始化一次、永不销毁；endpoint 重启只增删 account，传输（按类型+端口）保留复用。所有 pjsua 调用和 SIP 回调都在单个 `pjsua` 线程（`threadCnt=0` + `mainThreadOnly`，循环里跑任务队列和 `libHandleEvents`）。
-  - **不编译任何 Android 声卡后端**，只用空声卡：pjsua 完全不碰 AudioManager/音频模式。音频经 `AudioMediaPort`（`ConfPort`）进出会议桥（8 kHz/20 ms，无重采样、无 EC/VAD），两侧各一个最多 5 帧的 `FrameFifo` 吸收两套时钟的偏差。
-  - SWIG 对象（Call/Account/AudioMediaPort）必须在 pjsua 线程上显式 `delete()`，回调里不能删自己（`finish()` 把删除投递到下一轮）。`Account` 先 `shutdown()` 再 `delete()`。
-  - `stop()` 会等注销响应（≤1.5 s）：新 account 复用同一个 Contact，迟到的注销会把新注册删掉。
-  - 构建补丁（`native/`）：`config_site.h`、`pjsua2-java-ext.i`（ByteVector 整块拷贝的 typemap，必须插在 `%template(ByteVector)` 之前；SWIG director 线程常驻 attach）、`pjsip-tls-wildcard.patch`（RFC 6125 通配证书匹配）。pjsua 的日志回调受 `consoleLevel` 门控，不只是 stdout。
-- **运行时（`:app`）**：`GatewayRuntime` 单例，所有改状态的操作都在 `gateway-runtime` 单线程 executor 上执行；`GatewayApp.onCreate` 就启动它（Telecom 可能只为绑定 InCallService 拉起进程）。每 60 s 做一次健康检查，伴侣覆盖丢失时重跑 setup。设置保存在 SharedPreferences，SIP 密码用 Keystore AES-GCM 加密。
+### Takeover switch and handset muting
 
-### 接管开关与本机静音
+- **takeover=false**: disables the `GatewayInCallService` component, removes the Telecom companion override and
+  unregisters SIP — the phone behaves as if the app were not installed. Turning it off during a call takes effect
+  when the call ends (`takeoverOffPending`).
+- **The companion override is a plain list**: adding appends a duplicate, removing deletes one entry. `setup` must
+  count the existing entries before adding or removing them one by one.
+- **Earpiece mute**: once the tap is open, the shell process switches the audio mode from `IN_CALL(2)` to
+  `MODE_CALL_REDIRECT(5)`. The policy layer tears down the baseband ↔ earpiece/mic route while the redirected
+  record/track keep working. When the tap closes (`onClosed`) the mode goes back to NORMAL, i.e. our mode request
+  is withdrawn; AudioService also withdraws it if the process dies. `cmd audio adj-mute` no longer exists on
+  Android 17.
 
-- **takeover=false**：禁用 `GatewayInCallService` 组件、移除 Telecom 伴侣覆盖、注销 SIP，行为等同于未安装本 App。通话中关闭会等通话结束再生效（`takeoverOffPending`）。
-- **伴侣覆盖是一个普通列表**：添加会追加重复项，移除一次只删一条。`setup` 必须先数一下现有条目，再决定添加或逐条删除。
-- **earpiece mute**：tap 打开后，shell 进程把音频模式从 `IN_CALL(2)` 切到 `MODE_CALL_REDIRECT(5)`。策略层会拆掉"基带 ↔ 听筒/麦克风"的链路，重定向的 record/track 照常工作。tap 关闭时（`onClosed`）恢复为 NORMAL，相当于撤回我们这个模式请求。AudioService 在进程死亡时也会自动撤回。`cmd audio adj-mute` 在 Android 17 上已不存在。
+## Hard-won lessons (read before touching audio/privileged code)
 
-## 来之不易的坑（改音频/特权代码前必读）
+- **AudioFlinger attribution**: the Shizuku process's process-level identity is the app package while its uid is
+  2000, so AudioFlinger rejects it with `invalid attr`. Every audio object must be built explicitly with
+  `ShellEnv.shellContext()` (package / opPackage / AttributionSource all `com.android.shell`); helpers such as
+  `AudioManager.getCall*()` cannot be used.
+- **Audio attributes must match the framework helpers exactly**: the record's capture preset is
+  `VOICE_DOWNLINK(3)`; the track uses system usage `USAGE_CALL_ASSISTANT(17)` + `CONTENT_TYPE_SPEECH` plus
+  `setCallRedirectionMode(CALL_REDIRECT_PSTN)`. These are hidden APIs, called via reflection. Without them the
+  record silently falls back to the microphone and the track plays as media through the local speaker, **while
+  Telecom state and frame counters look perfectly normal** — only the `VsaTap` `levels`/`downVoiced` logs and a
+  human listener can tell.
+- **The device is the source of truth for hidden APIs**: `adb pull /system/framework/{framework,services}.jar`,
+  extract the dex, and disassemble the target method with `$ANDROID_SDK/build-tools/37.0.0/dexdump -d`
+  (e.g. `AudioManager.getCallDownlinkExtractionAudioRecord`, `AudioService.setMode`).
+- The companion override is lost on reboot or a Telecom restart; setup / the health check put it back. After a
+  reboot the phone is in BFU and non-root Shizuku must be restarted by hand; start-on-boot is a non-goal.
 
-- **AudioFlinger attribution**：Shizuku 进程的进程级身份是 App 包名，而 uid 是 2000，AudioFlinger 会以 `invalid attr` 拒绝。所有音频对象必须用 `ShellEnv.shellContext()`（包名/opPackage/AttributionSource 均为 `com.android.shell`）显式构建，不能用 `AudioManager.getCall*()` 这类 helper。
-- **音频属性必须与 framework helper 完全一致**：record 的 capture preset 设为 `VOICE_DOWNLINK(3)`，track 的 system usage 设为 `USAGE_CALL_ASSISTANT(17)` 加 `CONTENT_TYPE_SPEECH`，再加 `setCallRedirectionMode(CALL_REDIRECT_PSTN)`；这些都是隐藏 API，走反射。缺了属性，record 会退回麦克风、track 会当媒体从本机扬声器播出，**但 Telecom 状态和帧计数看上去都完全正常**，只能靠 `VsaTap` 的 `levels`/`downVoiced` 日志和真人听感判断。
-- **隐藏 API 的真实行为以设备为准**：`adb pull /system/framework/{framework,services}.jar`，解出 dex，用 `$ANDROID_SDK/build-tools/37.0.0/dexdump -d` 反汇编目标方法（例如 `AudioManager.getCallDownlinkExtractionAudioRecord`、`AudioService.setMode`）。
-- 伴侣覆盖会在重启或 Telecom 重启后丢失，靠 setup/健康检查重新补上。重启后手机处于 BFU，非 root 的 Shizuku 也需要手动重新启动，不追求开机自启。
+## PBX integration
 
-## PBX 集成（IssabelPBX 2.12 / Asterisk 16.28）
+- The gateway is a **trunk**, not an extension (`context=from-trunk`, `trust_id_inbound=yes`,
+  `remove_existing=yes`, ulaw/alaw only). See README for the reference `pjsip_custom_post.conf` /
+  `extensions_custom.conf`.
+- With a registrar-routing proxy in between (e.g. Flexisip), requests from the PBX are routed by Request-URI user
+  part, so the PBX must keep the gateway's own AoR there and pass the number in `X-VSA-Dial`
+  (`PJSIP/<number>@trunk` would 404).
 
-- 只读检查：`ssh pbx-host 'sudo -i asterisk -rx "…"'`。多行脚本写成文件后用 `ssh … 'sudo -i bash -s' < script` 执行；内联 heredoc 经过 `sudo -i` 会被压成一行。
-- **任何 PBX 修改都必须先得到用户明确同意**，并且先备份（mysqldump + 相关 conf）。
-- 网关是 **trunk**，不是分机：PJSIP endpoint/aor/auth `pixel11-gw` 手写在 `/etc/asterisk/pjsip_custom_post.conf`（`context=from-trunk`、`trust_id_inbound=yes`、`remove_existing=yes`、仅 ulaw/alaw）。网页后台对象（custom trunk `PJSIP/$OUTNUM$@pixel11-gw`、Outbound Route 前缀 `9#7#` + `X.`、Inbound Route DID `pixel11-gw` → 302）是直接写进 `asterisk` 库再 `module_admin reload` 的，在网页后台可见、可改。
-- `9#7#` 路由必须排在 `9_outside`（`_9.`）之前：每条 outbound route 是独立的被包含上下文，按顺序先匹配者生效。
-- 同机还有 another 蜂窝 trunk（`cell-trunk`，catch-all DID → 301）和 `extensions_custom.conf` 里的短信相关上下文，不要动。
-- trunk 去电：custom trunk 拨号串为 `Local/$OUTNUM$@vsa-pixel11-gw-out`，`extensions_custom.conf` 里的 `[vsa-pixel11-gw-out]`/`[vsa-pixel11-gw-hdr]` 用 `Dial(PJSIP/pixel11-gw)` 并以 `X-VSA-Dial` 头带号码，使 Request-URI 的 user 保持 `pixel11-gw`。endpoint 已改为 `media_encryption=sdes` + optimistic、`rewrite_contact=no`（与经 Flexisip 的 301/302 一致）。备份：`<backup-dir>/`。
-- 公网入口是 `sbc-host` 上的 Flexisip 2.6.1（`/opt/docker/flexisip`，TLS 5061 + MediaRelay），同时也是 WireGuard 中心节点（`wg0` 10.99.0.0/24，PBX 为 10.99.0.180）。改它同样需要用户同意。
-  - Flexisip 为网关**没有任何专门配置**。`insert-domain=true` 时 `CtRt` 只记 `transport:domain`，Asterisk 发回的请求一律进 Router、按 Request-URI user 查注册表；PBX 若把 user 换成号码（`PJSIP/<号码>@trunk`）必然 404，这就是 `X-VSA-Dial` 方案的原因。来电沿手机建立的 TLS 连接送达（NatHelper 修正 Contact + `fs-conn-id`）。
-  - 证书是 `*.example.org` 通配证书。
+## Secrets and privacy
 
-## 秘密与隐私
-
-- `sip_secret`、`pixel11-gw.secret`（第 1 行用户名、第 2 行密码）、`*.secret`、`local.properties` 均已 git 忽略，**不得提交、不得在输出中回显密码**。下发到手机时从文件读进 shell 变量，直接塞进 adb 广播。
-- 日志里电话号码只保留后 2 位（`redactNumber()`）；PCM 不写日志也不落盘，只记录电平/计数。
+- `sip_secret`, `*.secret`, `local.properties` and `CLAUDE.local.md` are git-ignored. **Never commit them and never
+  echo passwords in output.** When provisioning a phone, read the password into a shell variable and pass it
+  straight to the adb broadcast.
+- Phone numbers are logged with only their last 2 digits (`redactNumber()`); PCM is never logged or written to
+  disk — only levels/counters.

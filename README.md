@@ -1,85 +1,128 @@
-# android-voice-sip-agent
+# Voice SIP Agent
 
-把一台未 root 的 Android 手机变成单线 **蜂窝 ↔ SIP 网关**，接入局域网 Asterisk。
-特权操作（通话音频拦截、Telecom 伴侣覆盖、appops）通过 **Shizuku（shell uid 2000）** 完成；SIP 侧可选自研纯 Kotlin 协议栈或 pjsip（pjsua2）。
+[中文说明](README.zh.md)
 
-设计依据：`AirSIM/sip-gateway-notes/DESIGN.md`（Pixel 11 Pro / Android 17 实测）。
+Turn an **unrooted** Android phone into a single-line **cellular ↔ SIP gateway**. The phone registers to your PBX
+(Asterisk / FreePBX / IssabelPBX) as a SIP trunk:
 
-## 模块
+- **Cellular → SIP**: an incoming cellular call rings a DID on the PBX; the cellular call is answered only once
+  someone picks up on the SIP side, and the caller ID is passed in `P-Asserted-Identity`.
+- **SIP → cellular**: the PBX sends a call to the trunk and the phone places it on the cellular network.
+- Call audio is captured and injected with Android's call-redirection APIs, so the phone's own earpiece and
+  microphone can stay silent while a call is bridged.
 
-| 模块 | 类型 | 职责 |
+Privileged operations (call-audio interception, the Telecom companion override, appops) are performed through
+[Shizuku](https://shizuku.rikka.app/) running as the shell user (uid 2000) — **no root required**. This relies on
+hidden platform APIs, which is also why the app is distributed through GitHub Releases rather than Google Play.
+
+> [!WARNING]
+> This is a hobby project built on undocumented Android behaviour. It may stop working with any OS update, may
+> drop or misroute calls, and is provided **as is, without warranty of any kind**. Read the
+> [Disclaimer](#disclaimer) before using it.
+
+## Status
+
+Tested on:
+
+| Device | Android | Notes |
 |---|---|---|
-| `:voice-api` | JVM | 解耦契约：`CallLeg` / `CallEndpoint` / `MediaPort`（8 kHz PCM16，20 ms 帧）/ `HangupCause` |
-| `:sip` | JVM | SIP UA：UDP、事务层、Digest、REGISTER、INVITE/CANCEL/BYE/re-INVITE、SDP、RTP + 抖动缓冲、G.711、RFC 4733 |
-| `:gateway` | JVM | `CallBridge` 状态机（任意两个 `CallEndpoint` 互桥）、`MediaBridge`（单时钟域）、`EchoEndpoint`（回环测试） |
-| `:telephony` | Android | 伴侣 `InCallService` + `CellularEndpoint`：把 Telecom 通话映射为 `CallLeg` |
-| `:privileged` | Android | Shizuku UserService（AIDL）：setup/health、通话音频 tap（SOCK_SEQPACKET socketpair）；App 侧 `ShizukuConnector`、`PcmSocketPort` |
-| `:sip-pjsua2` | Android | pjsua2 实现的 `CallEndpoint`：空声卡 + `AudioMediaPort` 与 tap 交换 PCM，pjsua 不碰 Android 音频；原生库由 `native/build-pjsua2.sh` 生成 |
-| `:app` | Android | 运行时装配、前台服务、开机自启、设置（Keystore 加密密码）、adb 控制、Compose 界面 |
+| Google Pixel 11 Pro | 17 | Main development device |
+| Motorola | 16 | Works |
 
-接入新的语音/控制 SDK：实现一个 `CallEndpoint`（及其 `CallLeg` / `MediaPort`），交给 `CallBridge` 即可，网关核心不需要改。
+Verified: inbound and outbound calls, two-way audio, DTMF (RFC 4733), Wi-Fi reconnect (also mid-call), overnight
+Doze standby, long calls without clock drift, handset muting, LAN calls over UDP and public calls over TLS + SRTP
+through a Flexisip proxy.
 
-## 构建与测试
+Not yet verified: call waiting, DTMF and network-loss recovery with the pjsua2 stack, public calls over cellular
+data only.
 
-`:sip-pjsua2` 依赖本地编译的 pjproject（git 忽略的 `sip-pjsua2/src/generated/`），首次构建前执行一次（需要 NDK r28c、`brew install swig`）：
+Limitations: one call at a time; G.711 (PCMU/PCMA) only on the SIP side; arm64-v8a only; requires Android 14+
+(minSdk 34), but only the devices above have been tested — hidden APIs may behave differently elsewhere.
+Emergency numbers are always refused and are never dialed through the gateway.
+
+## Installation
+
+1. Install and start [Shizuku](https://shizuku.rikka.app/guide/setup/) (wireless debugging or adb). Shizuku must
+   be started again by hand after every reboot.
+2. Download `voice-sip-agent-<version>.apk` from [Releases](../../releases) and install it.
+   Verify the signing certificate if you like:
+
+   ```bash
+   apksigner verify --print-certs voice-sip-agent-0.1.0.apk
+   ```
+
+   The SHA-256 digest of the release signing certificate is
+   `b8fe38aa02f9657c6785fb6faeb20abb20deba410f9c643fcd93269b642850c4`.
+3. Open the app, tap **Grant Shizuku** and allow access. The app then runs its setup automatically (appops,
+   Telecom companion override, Doze allowlist, runtime permissions) and repeats it after upgrades and every 60 s
+   when something is missing.
+4. Fill in **Settings** (PBX host/port, transport, SRTP, user, password, …) and tap **Save & apply**.
+5. **Take over calls** is the master switch. When it is off the app removes itself from the call path entirely
+   and the phone behaves as if the app were not installed.
+
+## Configuration
+
+| Setting | Meaning |
+|---|---|
+| SIP stack | `pjsua2` (default; UDP/TCP/TLS, SRTP) or `builtin` (pure Kotlin, UDP only) |
+| PBX host / port | Registrar / proxy address |
+| Transport | `udp` (LAN), `tcp` or `tls` (pjsua2 only) |
+| SRTP | `off`, `optional` (offer SDES, fall back to RTP) or `mandatory` (488 otherwise); only effective with TLS |
+| SIP domain | Defaults to the PBX host |
+| User / password | Trunk credentials on the PBX |
+| Cellular inbound → SIP target | DID dialed on the PBX for incoming cellular calls; blank = the SIP user name |
+| Allowed dial-out prefixes | Comma-separated; empty = any number may be dialed out |
+| Silence handset | Keeps the phone's earpiece and microphone off while a call is bridged |
+
+TLS validates the server certificate chain and host name against the Android system CA store (TLS 1.2/1.3 only)
+and accepts `*.` wildcard certificates in the left-most label (RFC 6125). There is no downgrade: if TLS fails,
+registration fails and is retried every 30 s.
+
+### adb control
+
+The app can also be driven over adb (the receiver requires the `DUMP` permission, which only the shell user has):
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh   # pjproject 2.17，arm64-v8a，约 3 分钟
-./gradlew test                 # JVM 单元测试（sip、gateway）
-./gradlew :app:assembleDebug
-# 在开发机上直连 PBX 做 SIP 实测（读取 git 忽略的 ./sip_secret）
-./gradlew :sip:sipProbe -PprobeArgs="echo *43 40"
-```
-
-## 部署（adb）
-
-```bash
-adb install -r -g app/build/outputs/apk/debug/app-debug.apk
-# 配置 SIP（只有 shell 能发送：receiver 受 DUMP 权限保护）
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver \
-  --es op provision --es server <pbx> --ei port 5066 --es user pixel11-gw --es password '<secret>' --es target pixel11-gw
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op status
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op loopback --ez on true
-# SIP 实现：builtin（默认）或 pjsua2
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op sip-stack --es stack pjsua2
-# 经公网 SBC（如 Flexisip）：TLS 信令 + SDES-SRTP（仅 pjsua2；srtp = off | optional | mandatory）
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver \
-  --es op provision --es server sip.example.org --ei port 5061 --es transport tls --es domain sip.example.org --es srtp optional
-# pjsip info 级日志（开发调试用，默认关；错误/警告始终输出）
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op sip-debug --ez on true
-# 接管总开关：关闭后禁用 InCallService、撤销伴侣覆盖、注销 SIP，通话行为与未安装本 App 相同（通话中关闭则挂断后生效）
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op takeover --ez on false
-# 桥接期间静音本机听筒/麦克风（默认开；切到 MODE_CALL_REDIRECT，tap 关闭即恢复）
-adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op earpiece-mute --ez on true
+R=io.github.sparkcyf.voicesipagent/io.github.sparkcyf.voicesipagent.app.AdbControlReceiver
+adb shell am broadcast -n $R --es op provision --es server sip.example.org --ei port 5061 \
+  --es transport tls --es srtp optional --es domain sip.example.org \
+  --es user android-gw --es password "'<secret>'" --es target android-gw   # only overwrites the given fields
+adb shell am broadcast -n $R --es op status            # printed to logcat
+adb shell am broadcast -n $R --es op takeover --ez on false
+adb shell am broadcast -n $R --es op earpiece-mute --ez on true
+adb shell am broadcast -n $R --es op sip-stack --es stack pjsua2
+adb shell am broadcast -n $R --es op loopback --ez on true   # echo incoming cellular calls (test mode)
+adb shell am broadcast -n $R --es op sip-debug --ez on true  # verbose pjsip logging
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 
-首次运行需要在 Shizuku 中授权本 App；之后开机、升级后都会自动重新执行 setup（appops、伴侣覆盖、Doze 白名单、运行时权限授予）。
+Phone numbers are logged with only their last two digits; call audio is never logged or stored.
 
-## 呼叫路由
+## Call routing
 
-网关在 PBX 上作为 **trunk** 接入（不是分机）：手机向 PBX 注册，PBX 侧的路由全部在 Inbound/Outbound Routes 中管理。
+The gateway joins the PBX as a **trunk**, not an extension; all routing lives in the PBX's inbound/outbound
+routes.
 
-- **蜂窝来电**：手机 INVITE `sip:<target>@pbx`，`target` 是 DID（如 `pixel11-gw`），带 `P-Asserted-Identity` 传主叫号码；PBX 用 Inbound Route 按 DID 分配（如转 302）。SIP 接听后才接听蜂窝来电。
-- **SIP 去电**：PBX 呼叫网关，要拨的号码取自 `X-VSA-Dial` 头；没有该头时取 Request-URI 的用户部分（`PJSIP/$OUTNUM$@<trunk>` 直连时即号码）。蜂窝 ACTIVE 后回 200 OK。紧急号码一律拒绝（403），`prefixes` 可限制允许拨出的号码前缀。
-  - 中间隔着按注册表路由的代理（Flexisip 等）时，Request-URI 的用户部分必须保持网关自己的 AoR，否则代理按号码查注册必然 404；所以号码放进 `X-VSA-Dial`（见下方拨号方案）。
+- **Cellular inbound**: the phone sends `INVITE sip:<target>@<domain>`, where `target` is a DID (by default the
+  trunk's own user name), with the caller number in `P-Asserted-Identity`. An Inbound Route on the PBX sends the
+  DID wherever you like.
+- **SIP outbound**: the number to dial is taken from the `X-VSA-Dial` header, falling back to the Request-URI user
+  part (`PJSIP/$OUTNUM$@<trunk>` on a direct LAN connection). The PBX gets 200 OK once the cellular call is active.
+  - With a registrar-routing proxy in between (Flexisip etc.), the Request-URI user part must stay the gateway's
+    own AoR, otherwise the proxy looks up the number in its registrar and answers 404 — so the number goes in
+    `X-VSA-Dial` (see the dial plan below).
 
-### 传输与加密（pjsua2）
+### PBX example (FreePBX / IssabelPBX with chan_pjsip)
 
-- `transport`：`udp`（局域网）、`tcp`、`tls`。TLS 以 Android 系统 CA 库校验服务器证书链和主机名，仅 TLS 1.2/1.3；接受最左一级的 `*.` 通配证书（RFC 6125，原版 pjsip 按 RFC 5922 拒绝，见 `native/pjsip-tls-wildcard.patch`）。**信令不做降级**：TLS 失败只会注册失败并每 30 s 重试，不会退回明文。
-- `srtp`：仅在 TLS 下生效（明文信令里交换密钥没有意义）。`optional` 同时提供 RTP 与 SDES，对端不支持时退回 RTP；`mandatory` 不支持则 488。
-
-### PBX 配置示例（IssabelPBX / FreePBX + chan_pjsip）
-
-`pjsip_custom_post.conf`：
+`pjsip_custom_post.conf`:
 
 ```ini
-[pixel11-gw]
+[android-gw]
 type=endpoint
 transport=transport-udp
-context=from-trunk          ; 来电按 Inbound Route 处理，不具备内部分机权限
-aors=pixel11-gw
-auth=pixel11-gw-auth
+context=from-trunk          ; inbound calls go through Inbound Routes, no internal-extension privileges
+aors=android-gw
+auth=android-gw-auth
 identify_by=username
 disallow=all
 allow=ulaw,alaw
@@ -87,47 +130,130 @@ dtmf_mode=rfc4733
 direct_media=no
 rtp_symmetric=yes
 force_rport=yes
-rewrite_contact=no          ; 经 Flexisip 时 Contact 已由代理改写，不能再改
-media_encryption=sdes       ; 与 SRTP optional 配合；局域网明文 RTP 照常
+rewrite_contact=no          ; behind Flexisip the proxy already rewrote the Contact
+media_encryption=sdes       ; pairs with SRTP "optional"; plain RTP still works on a LAN
 media_encryption_optimistic=yes
-trust_id_inbound=yes        ; 采信网关的 P-Asserted-Identity 作为主叫号码
+trust_id_inbound=yes        ; trust the gateway's P-Asserted-Identity as caller ID
 
-[pixel11-gw-auth]
+[android-gw-auth]
 type=auth
 auth_type=userpass
-username=pixel11-gw
+username=android-gw
 password=<secret>
 
-[pixel11-gw]
+[android-gw]
 type=aor
 max_contacts=1
-remove_existing=yes         ; 手机换 IP/端口后立即接管注册
+remove_existing=yes         ; take over the registration as soon as the phone changes IP/port
 qualify_frequency=60
 ```
 
-`extensions_custom.conf`（新增独立上下文；保持 Request-URI 为网关 AoR，号码放头里）：
+`extensions_custom.conf` (keeps the Request-URI on the gateway's AoR and puts the number in a header):
 
 ```ini
-[vsa-pixel11-gw-out]
-exten => _X.,1,Dial(PJSIP/pixel11-gw,,b(vsa-pixel11-gw-hdr^s^1(${EXTEN})))
+[vsa-android-gw-out]
+exten => _X.,1,Dial(PJSIP/android-gw,,b(vsa-android-gw-hdr^s^1(${EXTEN})))
 exten => _X.,n,Hangup(${HANGUPCAUSE})
 
-[vsa-pixel11-gw-hdr]
+[vsa-android-gw-hdr]
 exten => s,1,Set(PJSIP_HEADER(add,X-VSA-Dial)=${ARG1})
 exten => s,n,Return()
 ```
 
-Web 后台：
+Web UI:
 
-- **Trunk**：Custom，拨号串 `Local/$OUTNUM$@vsa-pixel11-gw-out`（局域网直连、无代理时也可直接用 `PJSIP/$OUTNUM$@pixel11-gw`）。
-- **Outbound Route**：前缀 `9#7#`、匹配 `X.`，走上述 trunk；须排在 `9.` 之类更宽的路由之前。
-- **Inbound Route**：DID `pixel11-gw` → 目标分机（如 302）。
+- **Trunk**: Custom, dial string `Local/$OUTNUM$@vsa-android-gw-out` (on a direct LAN connection without a proxy,
+  `PJSIP/$OUTNUM$@android-gw` also works).
+- **Outbound Route**: a dedicated prefix (e.g. `9#7#`) with pattern `X.` using that trunk; it must be ordered
+  before broader routes such as `9.`.
+- **Inbound Route**: DID `android-gw` → the destination of your choice.
 
-### 公网接入：Flexisip
+### Reaching the PBX over the internet: Flexisip
 
-手机以 TLS 注册到 Flexisip（`sips:<domain>:5061`），Flexisip 按域名把请求经 WireGuard 转给 Asterisk，
-MediaRelay 中继媒体（SRTP 端到端在手机与 Asterisk 之间，中继不解密）。Flexisip 不需要为网关做任何专门配置：
+The phone registers over TLS to [Flexisip](https://www.linphone.org/en/flexisip-sip-server/)
+(`sips:<domain>:5061`), which forwards requests to Asterisk (e.g. over WireGuard) and relays media with
+MediaRelay (SRTP stays end-to-end between the phone and Asterisk). Flexisip needs no gateway-specific
+configuration:
 
-- REGISTER 由 Asterisk 鉴权（Flexisip 的 Authentication 关闭、`reg-on-response=true`）；`ContactRouteInserter` 把 Contact 改写成指向 Flexisip，NatHelper 修正 NAT 地址，来电沿手机已建立的 TLS 连接（`fs-conn-id`）送达，手机无需开放端口。
-- Asterisk 发回的请求由 Router 按 Request-URI 的用户部分查注册表，所以 trunk 去电必须用上面的 `X-VSA-Dial` 方案。
-- 手机配置：`server=domain=<flexisip 域名>`、`port=5061`、`transport=tls`、`srtp=optional`。
+- REGISTER is authenticated by Asterisk (Flexisip authentication off, `reg-on-response=true`).
+  `ContactRouteInserter` rewrites the Contact to point at Flexisip and NatHelper fixes the NAT address, so incoming
+  calls arrive over the TLS connection the phone already opened — no open ports on the phone.
+- Requests from Asterisk are routed by Request-URI user part, hence the `X-VSA-Dial` dial plan above.
+- Phone settings: `server = domain = <flexisip domain>`, `port = 5061`, `transport = tls`, `srtp = optional`.
+
+## Building from source
+
+Requirements: JDK 17+, Android SDK with NDK r28c (28.2.13676358), `swig` (e.g. `brew install swig`).
+
+```bash
+sip-pjsua2/native/build-pjsua2.sh   # once: OpenSSL 3.5.8 + pjproject 2.17 for arm64-v8a (~3 min), into git-ignored src/generated/
+./gradlew :sip:test :gateway:test   # JVM unit tests
+./gradlew :app:assembleDebug
+```
+
+The native build script downloads pinned, SHA-256-verified upstream tarballs and applies the patches in
+`sip-pjsua2/native/`.
+
+Release builds are signed only when `vsa.signing.storeFile`, `vsa.signing.storePassword`, `vsa.signing.keyAlias`
+and `vsa.signing.keyPassword` are set in `~/.gradle/gradle.properties`; otherwise `assembleRelease` produces an
+unsigned APK.
+
+## Architecture
+
+| Module | Type | Responsibility |
+|---|---|---|
+| `:voice-api` | JVM | Contract: `CallLeg` / `CallEndpoint` / `MediaPort` (8 kHz PCM16, 20 ms frames) / `HangupCause` |
+| `:sip` | JVM | Built-in SIP UA: UDP, transactions, digest auth, REGISTER, INVITE/CANCEL/BYE/re-INVITE, SDP, RTP + jitter buffer, G.711, RFC 4733 |
+| `:gateway` | JVM | `CallBridge` state machine (bridges any two `CallEndpoint`s), `MediaBridge` (single clock domain), `EchoEndpoint` |
+| `:telephony` | Android | Companion `InCallService` + `CellularEndpoint`: Telecom calls as `CallLeg`s |
+| `:privileged` | Android | Shizuku UserService (AIDL): setup/health, call-audio tap over a SOCK_SEQPACKET socketpair |
+| `:sip-pjsua2` | Android | pjsua2-backed `CallEndpoint`: null sound device + `AudioMediaPort`, pjsua never touches Android audio |
+| `:app` | Android | Runtime wiring, foreground service, settings (Keystore-sealed password), adb control, Compose UI |
+
+To plug in another voice/control backend, implement a `CallEndpoint` (with its `CallLeg` / `MediaPort`) and hand it
+to `CallBridge`; the gateway core does not change. See [AGENT.md](AGENT.md) for design notes and the pitfalls
+found along the way.
+
+## References
+
+- [AirSIM](https://github.com/kai-wu-cortex/AirSIM) — reading its code was the starting point for the call-audio
+  interception approach; this project is an independent implementation and does not depend on it.
+- [Shizuku](https://github.com/RikkaApps/Shizuku), [pjsip](https://github.com/pjsip/pjproject),
+  [Flexisip](https://gitlab.linphone.org/BC/public/flexisip).
+
+## License
+
+Copyright (C) 2026 sparkcyf
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
+License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later
+version. See [LICENSE](LICENSE).
+
+Release APKs statically link pjsip (GPL-2.0-or-later) and OpenSSL (Apache-2.0); see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The corresponding source for every release is the tagged commit
+of this repository plus the pinned upstream tarballs fetched by `sip-pjsua2/native/build-pjsua2.sh`.
+
+## Disclaimer
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE. You use it entirely at your own risk.
+
+In particular:
+
+- **Not for emergency calls.** Emergency numbers are refused by design. Do not rely on this gateway, or on a phone
+  running it, to reach emergency services.
+- **Calls may fail.** Calls can be dropped, rejected, misrouted or answered without audio, and an OS update can
+  break the app at any time. Missed calls and their consequences are your responsibility.
+- **Charges.** Calls placed through the gateway are billed by your carrier. Restrict dial-out prefixes and secure
+  your PBX; a compromised PBX can make the phone dial premium-rate numbers.
+- **Laws and terms of service.** Relaying, recording or intercepting calls, and connecting a mobile line to a PBX,
+  may be restricted by law or by your carrier's terms in your jurisdiction. You are solely responsible for
+  complying with them and for obtaining any consent required from the parties to a call.
+- **Security.** Shizuku grants this app shell-level privileges. Only install builds you trust, and keep your SIP
+  credentials and PBX secure.
+
+This project is not affiliated with or endorsed by Google, Motorola, the Shizuku, pjsip, Asterisk or Flexisip
+projects, or any carrier.
