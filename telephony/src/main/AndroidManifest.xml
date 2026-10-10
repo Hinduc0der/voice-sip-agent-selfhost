@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.CALL_COMPANION_APP" />
+    <uses-permission android:name="android.permission.MANAGE_ONGOING_CALLS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <application>
+        <!-- Companion InCallService: Telecom binds it alongside the stock dialer UI.
+             No IN_CALL_SERVICE_UI meta-data, so the Google Phone app stays the visible UI. -->
+        <service
+            android:name="com.voicesipagent.telephony.GatewayInCallService"
+            android:exported="true"
+            android:permission="android.permission.BIND_INCALL_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.InCallService" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
