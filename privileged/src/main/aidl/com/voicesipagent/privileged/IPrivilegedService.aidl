@@ -13,8 +13,11 @@ interface IPrivilegedService {
 
     int getUid() = 1;
 
-    /** Idempotent: appops, Telecom companion override, Doze allowlist, runtime grants. Returns health(). */
-    Bundle setup(String packageName) = 2;
+    /**
+     * Idempotent: appops, Doze allowlist, runtime grants, and the Telecom companion override, which
+     * is added when [takeover] is true and removed otherwise. Returns health().
+     */
+    Bundle setup(String packageName, boolean takeover) = 2;
 
     /** Keys: see HealthKeys. */
     Bundle health(String packageName) = 3;
@@ -32,6 +35,9 @@ interface IPrivilegedService {
     /** One-line counters for the current/last tap. */
     String audioStats() = 6;
 
-    /** Turns the local earpiece/speaker voice-call volume down (true) or restores it. */
+    /**
+     * Silences the handset's own earpiece/mic path for the current call (true) or restores it.
+     * Only valid while the tap is open; closing the tap always restores. Returns a short report.
+     */
     String setLocalOutputMuted(boolean muted) = 7;
 }

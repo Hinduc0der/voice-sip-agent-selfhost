@@ -64,6 +64,17 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Voice SIP Agent", style = MaterialTheme.typography.headlineSmall)
+        val cur by rt.settingsFlow.collectAsState()
+        Section("Takeover") {
+            Toggle("Take over calls", cur.takeover, { rt.setTakeover(it) }) {
+                when {
+                    h.takeoverOffPending -> "Turning off after the current call"
+                    cur.takeover -> "Calls are bridged to the PBX"
+                    else -> "Off: the phone behaves as if this app were not installed"
+                }
+            }
+            Toggle("Silence handset during bridged calls", cur.muteEarpiece, { rt.setMuteEarpiece(it) }) { "Earpiece and microphone stay off while the PBX side is connected" }
+        }
         Section("Health") {
             val p = h.privileged
             Check("Shizuku", h.shizuku == ShizukuConnector.State.CONNECTED, "${h.shizuku} ${h.shizukuDetail}")
@@ -128,6 +139,17 @@ private fun SettingsSection(rt: GatewayRuntime) {
                 ),
             )
         }) { Text("Save & apply") }
+    }
+}
+
+@Composable
+private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit, detail: () -> String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(label)
+            Text(detail(), style = MaterialTheme.typography.bodySmall)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
     }
 }
 

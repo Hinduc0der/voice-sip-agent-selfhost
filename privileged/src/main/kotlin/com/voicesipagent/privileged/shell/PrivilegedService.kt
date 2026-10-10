@@ -1,10 +1,12 @@
 package com.voicesipagent.privileged.shell
 
 import android.content.Context
+import android.media.AudioManager
 import android.os.Binder
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.voicesipagent.privileged.HealthKeys
 import com.voicesipagent.privileged.IPrivilegedService
@@ -20,7 +22,11 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     private val shellCtx = ShellEnv.shellContext(context)
     private var tap: CallAudioTap? = null
     private var lastTapStats = "no tap yet"
-    private var mutedByUs = false
+    private val audioManager by lazy { ShellEnv.audioManager(shellCtx) }
+
+    /** Guards [localMuted]; never held while taking the service or tap monitors (tap close calls back in). */
+    private val muteLock = Any()
+    private var localMuted = false
 
     init {
         Log.i(TAG, "created uid=${Process.myUid()} for $appPackage")
@@ -40,7 +46,7 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
 
     override fun getUid(): Int = Process.myUid()
 
-    override fun setup(packageName: String): Bundle {
+    override fun setup(packageName: String, takeover: Boolean): Bundle {
         enforceCaller(packageName)
         val log = StringBuilder()
         fun step(name: String, vararg cmd: String) {
@@ -48,8 +54,14 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
             log.append(name).append('=').append(if (r.exit == 0) "ok" else "fail(${r.exit}: ${r.out.trim().take(120)})").append('\n')
         }
         if (!appOpAllowed(packageName)) step("appops", "appops", "set", packageName, "MANAGE_ONGOING_CALLS", "allow")
-        // Lost on every reboot and Telecom restart, so always re-apply.
-        step("companion", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "1")
+        // The override is lost on every reboot and Telecom restart, so it is re-checked each time. Telecom
+        // keeps it as a plain list: adding appends a duplicate and removing drops one entry.
+        val entries = companionOverrideCount(packageName)
+        if (takeover && entries == 0) {
+            step("companion", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "1")
+        } else if (!takeover) {
+            repeat(entries) { step("companion-remove", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "0") }
+        }
         if (!dozeAllowlisted(packageName)) step("deviceidle", "cmd", "deviceidle", "whitelist", "+$packageName")
         for (perm in RUNTIME_PERMISSIONS) step("grant:${perm.substringAfterLast('.')}", "pm", "grant", packageName, perm)
         Log.i(TAG, "setup:\n$log")
@@ -73,7 +85,7 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     override fun openCallAudio(method: Int): ParcelFileDescriptor {
         enforceCaller()
         closeCallAudio()
-        val t = CallAudioTap(shellCtx, method)
+        val t = CallAudioTap(shellCtx, method) { restoreLocal("tap closed") }
         return try {
             t.open().also { tap = t }
         } catch (e: Throwable) {
@@ -97,23 +109,62 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         return tap?.stats() ?: lastTapStats
     }
 
-    @Synchronized
     override fun setLocalOutputMuted(muted: Boolean): String {
         enforceCaller()
-        if (muted == mutedByUs) return "unchanged"
-        // Stream 0 = STREAM_VOICE_CALL; adj-mute keeps the user's volume level for restore.
-        val r = ShellEnv.run("cmd", "audio", if (muted) "adj-mute" else "adj-unmute", "0")
-        if (r.exit == 0) mutedByUs = muted
-        return "exit=${r.exit}"
+        return if (muted) muteLocal() else restoreLocal("requested")
+    }
+
+    /**
+     * Switches the audio mode from IN_CALL to CALL_REDIRECT. Audio policy then tears down the
+     * modem<->earpiece/mic patches while the redirected record/track keep working. Shell holds
+     * MODIFY_PHONE_STATE, so its (newer) mode request outranks Telecom's IN_CALL. AudioService drops
+     * the request if this process dies, so a crash cannot leave the phone stuck in this mode.
+     */
+    private fun muteLocal(): String = synchronized(muteLock) {
+        if (localMuted) return "already muted"
+        if (tap == null) return "no tap open"
+        val before = audioManager.mode
+        if (before != AudioManager.MODE_IN_CALL) return "skipped: mode=$before"
+        audioManager.mode = MODE_CALL_REDIRECT
+        val after = awaitMode(MODE_CALL_REDIRECT)
+        localMuted = after == MODE_CALL_REDIRECT
+        val r = "mode $before->$after"
+        Log.i(TAG, "local mute: $r")
+        r
+    }
+
+    private fun restoreLocal(why: String): String = synchronized(muteLock) {
+        if (!localMuted) return "not muted"
+        localMuted = false
+        // NORMAL withdraws our request; the mode falls back to Telecom's (IN_CALL, or NORMAL after hangup).
+        audioManager.mode = AudioManager.MODE_NORMAL
+        val r = "restored ($why), mode=${awaitMode(-1)}"
+        Log.i(TAG, "local mute: $r")
+        r
+    }
+
+    /** Mode changes are applied asynchronously by AudioService; wait briefly for [want] (-1: just settle). */
+    private fun awaitMode(want: Int): Int {
+        val end = SystemClock.elapsedRealtime() + 600
+        var m = audioManager.mode
+        while (m != want && SystemClock.elapsedRealtime() < end) {
+            SystemClock.sleep(50)
+            m = audioManager.mode
+        }
+        return m
     }
 
     private fun appOpAllowed(pkg: String) =
         ShellEnv.run("appops", "get", pkg, "MANAGE_ONGOING_CALLS").out.contains("allow")
 
-    private fun companionOverridden(pkg: String): Boolean {
+    private fun companionOverridden(pkg: String) = companionOverrideCount(pkg) > 0
+
+    /** How many times [pkg] appears in Telecom's companion override list. */
+    private fun companionOverrideCount(pkg: String): Int {
         val out = ShellEnv.run("dumpsys", "telecom", timeoutSec = 15).out
-        // Printed as "DefaultCallCompanionApps: (override <pkg>)".
-        return out.lineSequence().any { it.contains("DefaultCallCompanionApps") && it.contains(pkg) }
+        // Printed as "DefaultCallCompanionApps: (override <pkg>, <pkg>, ...)".
+        val line = out.lineSequence().firstOrNull { it.contains("DefaultCallCompanionApps") } ?: return 0
+        return Regex("[\\s(,]${Regex.escape(pkg)}(?=[,)\\s])").findAll(line).count()
     }
 
     private fun dozeAllowlisted(pkg: String) =
@@ -121,6 +172,8 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
 
     companion object {
         private const val TAG = "VsaPrivileged"
+        /** AudioManager.MODE_CALL_REDIRECT (API 33, system API). */
+        private const val MODE_CALL_REDIRECT = 5
         private val RUNTIME_PERMISSIONS = listOf(
             "android.permission.CALL_PHONE",
             "android.permission.READ_PHONE_STATE",

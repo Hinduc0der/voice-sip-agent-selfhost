@@ -1,6 +1,7 @@
 package com.voicesipagent.telephony
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -205,6 +206,18 @@ class CellularEndpoint(
         @Volatile private var service: GatewayInCallService? = null
 
         val isCompanionBound: Boolean get() = service != null
+
+        /**
+         * Enables or disables our InCallService component. Disabled, Telecom never binds us and the
+         * phone behaves as if the app were not installed.
+         */
+        fun setCompanionComponentEnabled(context: Context, enabled: Boolean) {
+            context.packageManager.setComponentEnabledSetting(
+                ComponentName(context, GatewayInCallService::class.java),
+                if (enabled) PackageManager.COMPONENT_ENABLED_STATE_DEFAULT else PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                PackageManager.DONT_KILL_APP,
+            )
+        }
 
         internal fun attachService(s: GatewayInCallService) {
             service = s

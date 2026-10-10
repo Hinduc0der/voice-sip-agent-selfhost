@@ -13,6 +13,10 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 data class GatewaySettings(
+    /** Master switch. Off: the app leaves every call alone, exactly as if it were not installed. */
+    val takeover: Boolean = true,
+    /** Silence the handset earpiece/mic while a call is bridged. */
+    val muteEarpiece: Boolean = true,
     val server: String = "",
     val port: Int = 5060,
     val username: String = "",
@@ -28,7 +32,8 @@ data class GatewaySettings(
 ) {
     val sipConfigured: Boolean get() = server.isNotBlank() && username.isNotBlank() && password.isNotEmpty()
 
-    override fun toString() = "GatewaySettings(server=$server:$port user=$username target=$inboundTarget)"
+    override fun toString() =
+        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece server=$server:$port user=$username target=$inboundTarget)"
 }
 
 /** SharedPreferences, with the SIP password sealed by an Android Keystore AES-GCM key. */
@@ -36,6 +41,8 @@ class SettingsStore(context: Context) {
     private val prefs = context.getSharedPreferences("gateway", Context.MODE_PRIVATE)
 
     fun load(): GatewaySettings = GatewaySettings(
+        takeover = prefs.getBoolean("takeover", true),
+        muteEarpiece = prefs.getBoolean("mute_earpiece", true),
         server = prefs.getString("server", "")!!,
         port = prefs.getInt("port", 5060),
         username = prefs.getString("username", "")!!,
@@ -50,6 +57,8 @@ class SettingsStore(context: Context) {
 
     fun save(s: GatewaySettings) {
         prefs.edit()
+            .putBoolean("takeover", s.takeover)
+            .putBoolean("mute_earpiece", s.muteEarpiece)
             .putString("server", s.server.trim())
             .putInt("port", s.port)
             .putString("username", s.username.trim())

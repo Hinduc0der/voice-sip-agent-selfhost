@@ -20,7 +20,12 @@ import java.io.FileDescriptor
  * Shell-side call audio tap: downlink capture -> socket, socket -> uplink injection.
  * PCM stays in memory; only counters are logged.
  */
-internal class CallAudioTap(private val ctx: Context, private val method: Int) {
+internal class CallAudioTap(
+    private val ctx: Context,
+    private val method: Int,
+    /** Runs once when the tap shuts down, from whichever thread closed it. */
+    private val onClosed: () -> Unit,
+) {
     private lateinit var record: AudioRecord
     private lateinit var track: AudioTrack
     private lateinit var local: FileDescriptor
@@ -210,6 +215,7 @@ internal class CallAudioTap(private val ctx: Context, private val method: Int) {
         downThread = null
         upThread = null
         Log.i(TAG, "tap closed ${stats()}")
+        runCatching(onClosed).onFailure { Log.w(TAG, "onClosed failed: $it") }
     }
 
     fun stats() = "method=$usedMethod down=$downFrames up=$upFrames downPeak=$downPeak upPeak=$upPeak " +

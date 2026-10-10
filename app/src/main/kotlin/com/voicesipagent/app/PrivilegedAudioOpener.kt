@@ -9,12 +9,17 @@ import com.voicesipagent.telephony.CallAudioOpener
 class PrivilegedAudioOpener(
     private val shizuku: ShizukuConnector,
     private val method: () -> Int,
+    private val muteEarpiece: () -> Boolean,
 ) : CallAudioOpener {
     override fun open(onLost: (String) -> Unit): CallAudioHandle {
         val svc = shizuku.service ?: error("privileged service not connected (${shizuku.state})")
         val pfd = svc.openCallAudio(method())
         val port = PcmSocketPort(pfd, onLost).also { it.start() }
         AppLog.i("call audio tap opened: ${svc.audioStats()}")
+        if (muteEarpiece()) {
+            // Best effort: a failure here only means the handset stays audible.
+            AppLog.i("earpiece mute: ${runCatching { svc.setLocalOutputMuted(true) }.getOrElse { "failed: ${it.message}" }}")
+        }
         return object : CallAudioHandle {
             override val port = port
             override fun close() {

@@ -44,6 +44,7 @@ class GatewayService : Service() {
 
     private fun summary(h: HealthState): String = when {
         h.session != null -> "In call · ${h.session}"
+        !h.takeover -> "Call takeover off"
         h.loopbackTest -> "Loopback test mode"
         !h.privilegedReady -> "Setup needed · Shizuku ${h.shizuku.name.lowercase()}"
         !h.sip.ready -> "SIP: ${h.sip.detail}"

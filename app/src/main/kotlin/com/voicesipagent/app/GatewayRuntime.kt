@@ -34,6 +34,9 @@ data class HealthState(
     val privileged: Map<String, Boolean>? = null,
     val privilegedDetail: String = "",
     val sip: EndpointStatus = EndpointStatus(false, "not configured"),
+    val takeover: Boolean = true,
+    /** Takeover was switched off during a call; it takes effect when that call ends. */
+    val takeoverOffPending: Boolean = false,
     val companionBound: Boolean = false,
     val loopbackTest: Boolean = false,
     val session: String? = null,
@@ -47,6 +50,8 @@ data class HealthState(
  * Owns every long-lived component and wires them together:
  * Shizuku -> privileged setup -> cellular endpoint readiness; settings -> SIP UA; both -> CallBridge.
  * The bridge's B side is the SIP UA normally, or [EchoEndpoint] in loopback-test mode.
+ * With takeover off, the InCallService is disabled, the companion override withdrawn and SIP
+ * unregistered, so calls behave as if the app were not installed.
  */
 class GatewayRuntime private constructor(context: Context) {
     private val app = context.applicationContext
@@ -60,7 +65,9 @@ class GatewayRuntime private constructor(context: Context) {
     val health: StateFlow<HealthState> = _health
 
     val shizuku = ShizukuConnector(app) { AppLog.i(it) }
-    val cellular = CellularEndpoint(app, PrivilegedAudioOpener(shizuku) { settings.audioMethod }) { AppLog.i(it) }
+    val cellular = CellularEndpoint(app, PrivilegedAudioOpener(shizuku, { settings.audioMethod }, { settings.muteEarpiece })) {
+        AppLog.i(it)
+    }
     private var sip: SipUserAgent? = null
     private var bridge: CallBridge? = null
     private var started = false
@@ -80,6 +87,8 @@ class GatewayRuntime private constructor(context: Context) {
             if (state != ShizukuConnector.State.CONNECTED) updatePrivileged(null, shizuku.detail)
         }
         shizuku.start()
+        CellularEndpoint.setCompanionComponentEnabled(app, settings.takeover)
+        _health.update { it.copy(takeover = settings.takeover) }
         startSip()
         rebuildBridge()
         watchNetwork()
@@ -92,7 +101,7 @@ class GatewayRuntime private constructor(context: Context) {
     fun runSetup() = worker.execute {
         val svc = shizuku.service ?: return@execute updatePrivileged(null, "Shizuku not connected")
         try {
-            val b = svc.setup(app.packageName)
+            val b = svc.setup(app.packageName, settings.takeover)
             _health.update { it.copy(lastSetupLog = b.getString("setup_log").orEmpty()) }
             applyHealthBundle(b)
         } catch (e: Exception) {
@@ -106,7 +115,7 @@ class GatewayRuntime private constructor(context: Context) {
         try {
             val b = svc.health(app.packageName)
             applyHealthBundle(b)
-            if (!_health.value.privilegedReady && _health.value.session == null) {
+            if (settings.takeover && !_health.value.privilegedReady && _health.value.session == null) {
                 AppLog.i("health degraded; re-running setup")
                 runSetup()
             }
@@ -124,7 +133,11 @@ class GatewayRuntime private constructor(context: Context) {
     private fun updatePrivileged(map: Map<String, Boolean>?, detail: String) {
         _health.update { it.copy(privileged = map, privilegedDetail = detail) }
         val h = _health.value
-        cellular.setReadiness(h.privilegedReady, if (h.privilegedReady) "companion ready" else "privileged setup incomplete")
+        when {
+            !settings.takeover -> cellular.setReadiness(false, "takeover off")
+            h.privilegedReady -> cellular.setReadiness(true, "companion ready")
+            else -> cellular.setReadiness(false, "privileged setup incomplete")
+        }
         if (map != null) AppLog.i("privileged health: ${map.entries.joinToString { "${it.key}=${it.value}" }} $detail")
     }
 
@@ -134,6 +147,10 @@ class GatewayRuntime private constructor(context: Context) {
         sip?.stop()
         sip = null
         val s = settings
+        if (!s.takeover) {
+            _health.update { it.copy(sip = EndpointStatus(false, "takeover off")) }
+            return
+        }
         if (!s.sipConfigured) {
             _health.update { it.copy(sip = EndpointStatus(false, "not configured")) }
             return
@@ -184,6 +201,11 @@ class GatewayRuntime private constructor(context: Context) {
     private fun rebuildBridge() {
         bridge?.stop()
         val s = settings
+        if (!s.takeover) {
+            bridge = null
+            AppLog.i("bridge idle: takeover off")
+            return
+        }
         val loopback = _health.value.loopbackTest
         val sideB: CallEndpoint? = if (loopback) EchoEndpoint() else sip
         if (sideB == null) {
@@ -204,7 +226,10 @@ class GatewayRuntime private constructor(context: Context) {
             dialPolicyForA = { n -> if (cellular.isEmergencyNumber(n)) HangupCause.FORBIDDEN else null },
             log = { AppLog.i("bridge: $it") },
         )
-        b.addListener { session -> _health.update { it.copy(session = describe(session)) } }
+        b.addListener { session ->
+            _health.update { it.copy(session = describe(session)) }
+            if (session.endedAtMs != null) worker.execute { if (_health.value.takeoverOffPending) applyTakeover() }
+        }
         b.start()
         bridge = b
         AppLog.i("bridge ready: cellular <-> ${sideB.name}")
@@ -226,6 +251,37 @@ class GatewayRuntime private constructor(context: Context) {
         rebuildBridge()
     }
 
+    /** Read at each call's audio setup, so no restart is needed. */
+    fun setMuteEarpiece(on: Boolean) = worker.execute {
+        settingsStore.save(settings.copy(muteEarpiece = on).also { _settings.value = it })
+        AppLog.i("earpiece mute ${if (on) "on" else "off"} (from next call)")
+    }
+
+    /** The master switch. Switching off mid-call waits for that call to end. */
+    fun setTakeover(on: Boolean) = worker.execute {
+        if (settings.takeover != on) {
+            settingsStore.save(settings.copy(takeover = on).also { _settings.value = it })
+        }
+        if (!on && _health.value.session != null) {
+            _health.update { it.copy(takeoverOffPending = true) }
+            AppLog.i("call takeover OFF requested; takes effect after the current call")
+            return@execute
+        }
+        applyTakeover()
+    }
+
+    private fun applyTakeover() {
+        val on = settings.takeover
+        _health.update { it.copy(takeover = on, takeoverOffPending = false) }
+        if (on) CellularEndpoint.setCompanionComponentEnabled(app, true)
+        startSip()
+        rebuildBridge()
+        // Withdraws or restores the Telecom companion override.
+        runSetup()
+        if (!on) CellularEndpoint.setCompanionComponentEnabled(app, false)
+        AppLog.i(if (on) "call takeover ON" else "call takeover OFF: all calls are left to the phone")
+    }
+
     fun setLoopbackTest(on: Boolean) = worker.execute {
         if (_health.value.loopbackTest == on) return@execute
         _health.update { it.copy(loopbackTest = on) }
@@ -241,6 +297,7 @@ class GatewayRuntime private constructor(context: Context) {
     fun statusReport(): String {
         val h = _health.value
         return buildString {
+            appendLine("takeover=${h.takeover} pendingOff=${h.takeoverOffPending} muteEarpiece=${settings.muteEarpiece}")
             appendLine("shizuku=${h.shizuku} (${h.shizukuDetail})")
             appendLine("privileged=${h.privileged} ${h.privilegedDetail}")
             appendLine("sip=${h.sip.detail} ready=${h.sip.ready}")

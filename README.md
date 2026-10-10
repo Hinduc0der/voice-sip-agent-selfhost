@@ -36,6 +36,10 @@ adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlRece
   --es op provision --es server <pbx> --ei port 5066 --es user pixel11-gw --es password '<secret>' --es target pixel11-gw
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op status
 adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op loopback --ez on true
+# 接管总开关：关闭后禁用 InCallService、撤销伴侣覆盖、注销 SIP，通话行为与未安装本 App 相同（通话中关闭则挂断后生效）
+adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op takeover --ez on false
+# 桥接期间静音本机听筒/麦克风（默认开；切到 MODE_CALL_REDIRECT，tap 关闭即恢复）
+adb shell am broadcast -n com.voicesipagent/com.voicesipagent.app.AdbControlReceiver --es op earpiece-mute --ez on true
 adb logcat -s VoiceSipAgent VsaPrivileged VsaTap
 ```
 
