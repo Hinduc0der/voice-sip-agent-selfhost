@@ -225,9 +225,7 @@ found along the way.
 
 Copyright (C) 2026 sparkcyf
 
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public
-License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later
-version. See [LICENSE](LICENSE).
+This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version. See [LICENSE](LICENSE). As a special exception, linking with any library licensed under the Apache License, Version 2.0 is permitted, provided all other code complies with the GPL.
 
 Release APKs statically link pjsip (GPL-2.0-or-later) and OpenSSL (Apache-2.0); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The corresponding source for every release is the tagged commit

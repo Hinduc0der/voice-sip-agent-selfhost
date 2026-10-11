@@ -203,8 +203,7 @@ sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSS
 
 Copyright (C) 2026 sparkcyf
 
-本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证第 3 版或（由你选择）任何更新的版本，再分发和/或修改它。
-详见 [LICENSE](LICENSE)（以英文原文为准）。
+本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证第 2 版或（由你选择）任何更新的版本，再分发和/或修改它。详见 [LICENSE](LICENSE)（以英文原文为准）。例外：允许将本程序与任何依据 Apache License 2.0 许可的库链接，前提是其余所有代码均遵守 GPL。
 
 Release APK 静态链接了 pjsip（GPL-2.0-or-later）和 OpenSSL（Apache-2.0），见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 每个 release 对应的源码是本仓库对应 tag 的提交，加上 `sip-pjsua2/native/build-pjsua2.sh` 下载的版本固定的上游源码包。

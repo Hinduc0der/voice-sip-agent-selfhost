@@ -1,6 +1,7 @@
 # Third-party notices
 
-Voice SIP Agent is licensed under the GNU General Public License v3.0 or later (see [LICENSE](LICENSE)).
+Voice SIP Agent is licensed under the GNU General Public License v2 or later with an Apache-2.0 linking
+exception.
 Release APKs include the following third-party software.
 
 ## Native code (statically linked into `libpjsua2.so`)
@@ -14,9 +15,8 @@ Release APKs include the following third-party software.
 
 pjproject is built by [`sip-pjsua2/native/build-pjsua2.sh`](sip-pjsua2/native/build-pjsua2.sh) from the
 SHA-256-pinned upstream release tarballs, with the modifications in [`sip-pjsua2/native/`](sip-pjsua2/native/)
-(`config_site.h`, `pjsua2-java-ext.i`, `pjsip-tls-wildcard.patch`). Because the combined work includes
-Apache-2.0 code (OpenSSL), it is distributed under the terms of GPL-3.0-or-later, which pjproject's
-"version 2 or later" grant permits.
+(`config_site.h`, `pjsua2-java-ext.i`, `pjsip-tls-wildcard.patch`). The [pjsip third-party license notice](https://docs.pjsip.org/en/latest/overview/license_3rd_party.html)
+gives explicit permission to link pjproject with OpenSSL.
 
 ## Java / Kotlin libraries
 
