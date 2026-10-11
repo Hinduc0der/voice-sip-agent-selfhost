@@ -12,6 +12,7 @@ import io.github.sparkcyf.voicesipagent.voice.LegDirection
 import io.github.sparkcyf.voicesipagent.voice.LegState
 import io.github.sparkcyf.voicesipagent.voice.MediaPort
 import io.github.sparkcyf.voicesipagent.voice.Party
+import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import io.github.sparkcyf.voicesipagent.voice.VoiceFormat
 import java.util.ArrayDeque
 import java.util.Timer
@@ -25,6 +26,7 @@ import kotlin.concurrent.schedule
 class EchoEndpoint(
     private val answerDelayMs: Long = 1000,
     private val echoDelayMs: Int = 200,
+    private val format: PcmFormat = PcmFormat.NARROWBAND,
 ) : CallEndpoint {
     override val name = "echo"
     override val status = EndpointStatus(true, "echo test")
@@ -36,15 +38,15 @@ class EchoEndpoint(
     override fun removeStatusListener(listener: EndpointStatusListener) {}
 
     override fun dial(target: String, caller: Party): CallLeg {
-        val leg = EchoLeg("e${ids.getAndIncrement()}", target, echoDelayMs / VoiceFormat.FRAME_MS)
+        val leg = EchoLeg("e${ids.getAndIncrement()}", target, echoDelayMs / VoiceFormat.FRAME_MS, format)
         leg.proceed()
         timer.schedule(answerDelayMs) { leg.connect() }
         return leg
     }
 
-    private class EchoLeg(id: String, target: String, delayFrames: Int) :
+    private class EchoLeg(id: String, target: String, delayFrames: Int, format: PcmFormat) :
         AbstractCallLeg(id, "echo", LegDirection.OUTBOUND, Party(target), target) {
-        private val port = DelayPort(delayFrames)
+        private val port = DelayPort(delayFrames, format)
         fun proceed() = transition(LegState.RINGING)
         fun connect() {
             if (transition(LegState.CONNECTED)) publishMedia(port)
@@ -55,12 +57,12 @@ class EchoEndpoint(
         override fun sendDtmf(digit: Char, durationMs: Int) {}
     }
 
-    private class DelayPort(private val frames: Int) : MediaPort {
+    private class DelayPort(private val frames: Int, override val format: PcmFormat) : MediaPort {
         private val line = ArrayDeque<ShortArray>()
         override val isClockSource = false
         override fun setClockListener(listener: FrameClockListener?) {}
         @Synchronized override fun readFrame(): ShortArray =
-            if (line.size > frames) line.poll() else VoiceFormat.silence()
+            if (line.size > frames) line.poll() else format.silence()
         @Synchronized override fun writeFrame(frame: ShortArray) {
             line.add(frame)
             while (line.size > frames + 5) line.poll()

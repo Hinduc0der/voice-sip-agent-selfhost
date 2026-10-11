@@ -178,6 +178,11 @@ class CallBridge(
             val ma = a.media
             val mb = b.media
             if (s.media == null && ma != null && mb != null) {
+                if (ma.format != mb.format) {
+                    log("$s: incompatible media formats ${ma.format} / ${mb.format}")
+                    endSession(s, HangupCause.INTERNAL_ERROR)
+                    return
+                }
                 s.media = MediaBridge(ma, mb).also { it.start() }
                 s.mediaTimer?.cancel(false)
                 log("$s: media bridged")

@@ -5,7 +5,7 @@
 # Both are git-ignored; rerun this script after a clean checkout or a pjproject upgrade.
 #
 # Media profile: null sound device only (no Android audio backend is compiled in, so pjsua never
-# touches AudioManager), no video, G.711 + G.722 + bundled libsrtp. TLS/DTLS via a static OpenSSL
+# touches AudioManager), no video, G.711 + mono Opus (up to 16 kHz) + bundled libsrtp. TLS/DTLS via a static OpenSSL
 # LTS build linked into libpjsua2.so.
 set -euo pipefail
 
@@ -13,6 +13,8 @@ PJ_VERSION=2.17
 PJ_SHA256=065fe06c06788d97c35f563796d59f00ce52fe9558a52d7b490a042a966facce
 OSSL_VERSION=3.5.8
 OSSL_SHA256=a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2
+OPUS_VERSION=1.6.1
+OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
 ABIS=${ABIS:-arm64-v8a}
 APP_PLATFORM=${APP_PLATFORM:-android-34}
 
@@ -38,6 +40,12 @@ if [ ! -f "$OSSL_TARBALL" ]; then
   mv "$OSSL_TARBALL.part" "$OSSL_TARBALL"
 fi
 echo "$OSSL_SHA256  $OSSL_TARBALL" | shasum -a 256 -c -
+OPUS_TARBALL="$WORK/opus-$OPUS_VERSION.tar.gz"
+if [ ! -f "$OPUS_TARBALL" ]; then
+  curl -fsSL -o "$OPUS_TARBALL.part" "https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz"
+  mv "$OPUS_TARBALL.part" "$OPUS_TARBALL"
+fi
+echo "$OPUS_SHA256  $OPUS_TARBALL" | shasum -a 256 -c -
 HOST_TAG=$(ls "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt" | head -1)
 API=${APP_PLATFORM#android-}
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
@@ -55,10 +63,11 @@ for ABI in $ABIS; do
 
   # Static OpenSSL for this ABI, installed into $WORK/$ABI/openssl.
   case $ABI in
-    arm64-v8a) OSSL_TARGET=android-arm64 ;;
-    armeabi-v7a) OSSL_TARGET=android-arm ;;
-    x86_64) OSSL_TARGET=android-x86_64 ;;
-    x86) OSSL_TARGET=android-x86 ;;
+    arm64-v8a) OSSL_TARGET=android-arm64; OPUS_HOST=aarch64-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
+    armeabi-v7a) OSSL_TARGET=android-arm; OPUS_HOST=arm-linux-androideabi; OPUS_CC_TARGET=armv7a-linux-androideabi ;;
+    x86_64) OSSL_TARGET=android-x86_64; OPUS_HOST=x86_64-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
+    x86) OSSL_TARGET=android-x86; OPUS_HOST=i686-linux-android; OPUS_CC_TARGET=$OPUS_HOST ;;
+    *) echo "Unsupported ABI: $ABI" >&2; exit 1 ;;
   esac
   SSL_PREFIX="$WORK/$ABI/openssl"
   tar xzf "$OSSL_TARBALL" -C "$WORK/$ABI"
@@ -69,6 +78,19 @@ for ABI in $ABIS; do
       no-comp no-ssl3 no-weak-ssl-ciphers --prefix="$SSL_PREFIX" --openssldir=/nonexistent --libdir=lib
     make -j"$JOBS" build_libs
     make install_dev
+  )
+  # Static libopus.
+  OPUS_PREFIX="$WORK/$ABI/opus"
+  tar xzf "$OPUS_TARBALL" -C "$WORK/$ABI"
+  (
+    cd "$WORK/$ABI/opus-$OPUS_VERSION"
+    TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin"
+    export CC="$TOOLCHAIN/${OPUS_CC_TARGET}${API}-clang"
+    export AR="$TOOLCHAIN/llvm-ar" RANLIB="$TOOLCHAIN/llvm-ranlib" STRIP="$TOOLCHAIN/llvm-strip"
+    CFLAGS="-O2 -fPIC" ./configure --host="$OPUS_HOST" --prefix="$OPUS_PREFIX" \
+      --disable-shared --enable-static --with-pic --disable-doc --disable-extra-programs
+    make -j"$JOBS"
+    make install
   )
   cp "$HERE/config_site.h" "$SRC/pjlib/include/pj/config_site.h"
   # Accept "*." wildcard server certificates (RFC 6125); stock pjsip rejects them per RFC 5922.
@@ -83,15 +105,17 @@ for ABI in $ABIS; do
   (
     cd "$SRC"
     TARGET_ABI=$ABI APP_PLATFORM=$APP_PLATFORM ./configure-android --use-ndk-cflags \
-      --with-ssl="$SSL_PREFIX" \
+      --with-ssl="$SSL_PREFIX" --with-opus="$OPUS_PREFIX" \
       --disable-sound --disable-video --disable-upnp \
-      --disable-opus --disable-silk --disable-bcg729 --disable-lyra --disable-opencore-amr \
+      --disable-silk --disable-bcg729 --disable-lyra --disable-opencore-amr \
       --disable-openh264 --disable-vpx --disable-ffmpeg --disable-v4l2 --disable-sdl \
       --disable-libyuv --disable-libwebrtc --disable-android-mediacodec \
-      --disable-gsm-codec --disable-ilbc-codec --disable-speex-codec --disable-g7221-codec \
+      --disable-gsm-codec --disable-ilbc-codec --disable-speex-codec --disable-g722-codec --disable-g7221-codec \
       --disable-l16-codec --disable-speex-aec
     make dep
     grep -q "PJ_HAS_SSL_SOCK 1" pjlib/include/pj/compat/os_auto.h || { echo "SSL not enabled" >&2; exit 1; }
+    grep -q "PJMEDIA_HAS_OPUS_CODEC 1" pjmedia/include/pjmedia-codec/config_auto.h || { echo "Opus not enabled" >&2; exit 1; }
+    grep -q "PJMEDIA_HAS_G722_CODEC 0" pjmedia/include/pjmedia-codec/config_auto.h || { echo "G.722 not disabled" >&2; exit 1; }
     make -j"$JOBS"
     make -C pjsip-apps/src/swig/java
   )

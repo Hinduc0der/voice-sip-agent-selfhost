@@ -36,7 +36,21 @@ through a Flexisip proxy.
 Not yet verified: call waiting, DTMF and network-loss recovery with the pjsua2 stack, public calls over cellular
 data only.
 
-Limitations: one call at a time; G.711 (PCMU/PCMA) only on the SIP side; arm64-v8a only; requires Android 14+
+The default pjsua2 SIP stack prefers mono Opus (16 kHz PCM, 20 ms frames, 20 kbit/s target), with G.711
+(PCMU/PCMA) fallback. Android capture/injection and the bridge use 16 kHz mono PCM for pjsua2, and 8 kHz
+for the built-in Kotlin/G.711 stack. Each 20 ms socket packet is respectively 640 or 320 bytes. PJMEDIA
+resamples between the 16 kHz bridge and G.711. There is no automatic 16-to-8 kHz fallback: Android
+open/start/read/write failures are reported and terminate the tap. A 16 kHz stream can still contain
+upsampled narrowband audio, depending on the cellular call and device. Opus uses the standard
+`opus/48000/2` SDP mapping with `maxplaybackrate=16000` and `sprop-maxcapturerate=16000`. G.722 is disabled.
+Opus VAD/DTX is enabled by default to reduce cellular-to-SIP silence payload bandwidth; SDP advertises
+`usedtx=1` to request DTX from the SIP peer too. The peer's negotiated DTX preference is honored.
+PCMU/PCMA keep VAD disabled and transmit continuously. PCM capture and bridging continue every 20 ms.
+Quiet speech, call-progress tones, hold music and prolonged silence with PBX/NAT timeouts still need
+device testing. Acoustic echo cancellation belongs at the microphone endpoint.
+The 16 kHz tap and Opus calls have not yet been verified on a device.
+
+Limitations: one call at a time; arm64-v8a only; requires Android 14+
 (minSdk 34), but only the devices above have been tested — hidden APIs may behave differently elsewhere.
 Emergency numbers are always refused and are never dialed through the gateway.
 
@@ -183,10 +197,10 @@ configuration:
 
 ## Building from source
 
-Requirements: JDK 17+, Android SDK with NDK r28c (28.2.13676358), `swig` (e.g. `brew install swig`).
+Requirements: JDK 17+, Android SDK with NDK, `swig` (e.g. `brew install swig`).
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh   # once: OpenSSL 3.5.8 + pjproject 2.17 for arm64-v8a (~3 min), into git-ignored src/generated/
+sip-pjsua2/native/build-pjsua2.sh   # once: OpenSSL + libopus + pjproject for arm64-v8a, into git-ignored src/generated/
 ./gradlew :sip:test :gateway:test   # JVM unit tests
 ./gradlew :app:assembleDebug
 ```
@@ -202,7 +216,7 @@ unsigned APK.
 
 | Module | Type | Responsibility |
 |---|---|---|
-| `:voice-api` | JVM | Contract: `CallLeg` / `CallEndpoint` / `MediaPort` (8 kHz PCM16, 20 ms frames) / `HangupCause` |
+| `:voice-api` | JVM | Contract: `CallLeg` / `CallEndpoint` / `MediaPort` (8/16 kHz mono PCM16, 20 ms frames) / `HangupCause` |
 | `:sip` | JVM | Built-in SIP UA: UDP, transactions, digest auth, REGISTER, INVITE/CANCEL/BYE/re-INVITE, SDP, RTP + jitter buffer, G.711, RFC 4733 |
 | `:gateway` | JVM | `CallBridge` state machine (bridges any two `CallEndpoint`s), `MediaBridge` (single clock domain), `EchoEndpoint` |
 | `:telephony` | Android | Companion `InCallService` + `CellularEndpoint`: Telecom calls as `CallLeg`s |
@@ -227,7 +241,7 @@ Copyright (C) 2026 sparkcyf
 
 This program is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation; either version 2 of the License, or (at your option) any later version. See [LICENSE](LICENSE). As a special exception, linking with any library licensed under the Apache License, Version 2.0 is permitted, provided all other code complies with the GPL.
 
-Release APKs statically link pjsip (GPL-2.0-or-later) and OpenSSL (Apache-2.0); see
+Release APKs statically link pjsip (GPL-2.0-or-later), OpenSSL (Apache-2.0) and libopus (BSD-3-Clause); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The corresponding source for every release is the tagged commit
 of this repository plus the pinned upstream tarballs fetched by `sip-pjsua2/native/build-pjsua2.sh`.
 

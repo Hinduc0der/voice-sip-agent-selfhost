@@ -2,6 +2,7 @@ package io.github.sparkcyf.voicesipagent.gateway
 
 import io.github.sparkcyf.voicesipagent.voice.HangupCause
 import io.github.sparkcyf.voicesipagent.voice.LegState
+import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -141,11 +142,42 @@ class CallBridgeTest {
 
     @Test
     fun loopbackEchoesCapturedAudio() {
-        val port = FakePort(isClockSource = true, fill = 7)
-        val mb = MediaBridge.loopback(port).also { it.start() }
-        port.clock!!.onFrame()
-        port.clock!!.onFrame()
-        assertEquals(7.toShort(), port.written.last()[0])
-        mb.stop()
+        for (format in listOf(PcmFormat.NARROWBAND, PcmFormat.WIDEBAND)) {
+            val port = FakePort(isClockSource = true, fill = 7, format = format)
+            val mb = MediaBridge.loopback(port).also { it.start() }
+            try {
+                port.clock!!.onFrame()
+                assertEquals(format.frameSamples, port.written.single().size)
+                assertTrue(port.written.single().all { it == 0.toShort() })
+                port.clock!!.onFrame()
+                assertTrue(port.written.last().all { it == 7.toShort() })
+            } finally { mb.stop() }
+        }
+    }
+
+    @Test fun widebandCallBridgesWholeFramesInBothDirections() {
+        val a = cell.incoming("13800001234"); settle()
+        val b = sip.dialed.single()
+        b.remoteAnswered(); settle()
+        val cellPort = FakePort(true, 11, PcmFormat.WIDEBAND)
+        val sipPort = FakePort(false, 22, PcmFormat.WIDEBAND)
+        a.mediaUp(cellPort); b.mediaUp(sipPort); settle()
+        cellPort.clock!!.onFrame()
+        assertEquals(320, cellPort.written.single().size)
+        assertEquals(320, sipPort.written.single().size)
+        assertTrue(cellPort.written.single().all { it == 22.toShort() })
+        assertTrue(sipPort.written.single().all { it == 11.toShort() })
+    }
+
+    @Test fun incompatibleFormatsEndTheCall() {
+        val a = cell.incoming("13800001234"); settle()
+        val b = sip.dialed.single()
+        b.remoteAnswered(); settle()
+        val cellPort = FakePort(true, 11, PcmFormat.WIDEBAND)
+        a.mediaUp(cellPort); b.mediaUp(FakePort(false, 22)); settle()
+        assertNull(bridge.session)
+        assertEquals(HangupCause.INTERNAL_ERROR, a.endCause)
+        assertEquals(HangupCause.INTERNAL_ERROR, b.endCause)
+        assertNull(cellPort.clock)
     }
 }

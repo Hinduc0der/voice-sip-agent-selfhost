@@ -32,7 +32,19 @@
 
 尚未验证：通话等待、pjsua2 栈下的 DTMF 与断网恢复、仅用蜂窝数据的公网通话。
 
-限制：同一时间只有一路通话；SIP 侧只支持 G.711（PCMU/PCMA）；只有 arm64-v8a；要求 Android 14+（minSdk 34），
+默认 pjsua2 栈优先使用单声道 Opus（16 kHz PCM、20 ms 帧、目标码率 20 kbit/s），并保留 G.711
+（PCMU/PCMA）作为回退。pjsua2 的 Android 采集、注入和音频桥使用 16 kHz 单声道 PCM；内置 Kotlin/G.711
+栈使用 8 kHz。每个 20 ms socket 数据包分别为 640 或 320 字节。PJMEDIA 在 16 kHz 音频桥和 G.711 之间
+重采样。不自动从 16 kHz 回退到 8 kHz：Android 打开、启动、读写失败会报错并关闭音频通道。
+16 kHz 流仍可能是窄带音频的上采样，取决于蜂窝通话和设备。SDP 使用标准的 `opus/48000/2`，并声明 `maxplaybackrate=16000` 和
+`sprop-maxcapturerate=16000`。G.722 已禁用。Opus 默认启用 VAD/DTX，减少蜂窝到 SIP 方向静音时的
+音频载荷带宽；SDP 声明 `usedtx=1`，同时请求 SIP 对端使用 DTX，并遵循对端协商的 DTX 偏好。
+PCMU/PCMA 保持 VAD 关闭并连续发送。PCM 采集和音频桥仍每 20 ms 运行一次。
+轻声语音、呼叫提示音、等待音乐以及长时间静音时的 PBX/NAT 超时行为仍需在设备上验证。
+声学回声消除应由实际使用麦克风的客户端完成。
+16 kHz 音频通道和 Opus 通话尚未在设备上验证。
+
+限制：同一时间只有一路通话；只有 arm64-v8a；要求 Android 14+（minSdk 34），
 但只在上表设备上测试过，其他机型的隐藏 API 行为可能不同。紧急号码一律拒绝，绝不会经网关拨出。
 
 ## 安装
@@ -165,10 +177,10 @@ Flexisip 不需要为网关做任何专门配置：
 
 ## 从源码构建
 
-需要：JDK 17+，带 NDK r28c（28.2.13676358）的 Android SDK，`swig`（如 `brew install swig`）。
+需要：JDK 17+，带 NDK 的 Android SDK，`swig`（如 `brew install swig`）。
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSSL 3.5.8 + pjproject 2.17（约 3 分钟），产物在 git 忽略的 src/generated/
+sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSSL + libopus + pjproject，产物在 git 忽略的 src/generated/
 ./gradlew :sip:test :gateway:test   # JVM 单元测试
 ./gradlew :app:assembleDebug
 ```
@@ -182,7 +194,7 @@ sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSS
 
 | 模块 | 类型 | 职责 |
 |---|---|---|
-| `:voice-api` | JVM | 解耦契约：`CallLeg` / `CallEndpoint` / `MediaPort`（8 kHz PCM16，20 ms 帧）/ `HangupCause` |
+| `:voice-api` | JVM | 解耦契约：`CallLeg` / `CallEndpoint` / `MediaPort`（8/16 kHz 单声道 PCM16，20 ms 帧）/ `HangupCause` |
 | `:sip` | JVM | 自研 SIP UA：UDP、事务层、Digest、REGISTER、INVITE/CANCEL/BYE/re-INVITE、SDP、RTP + 抖动缓冲、G.711、RFC 4733 |
 | `:gateway` | JVM | `CallBridge` 状态机（任意两个 `CallEndpoint` 互桥）、`MediaBridge`（单时钟域）、`EchoEndpoint` |
 | `:telephony` | Android | 伴侣 `InCallService` + `CellularEndpoint`：把 Telecom 通话映射为 `CallLeg` |
@@ -205,7 +217,7 @@ Copyright (C) 2026 sparkcyf
 
 本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证第 2 版或（由你选择）任何更新的版本，再分发和/或修改它。详见 [LICENSE](LICENSE)（以英文原文为准）。例外：允许将本程序与任何依据 Apache License 2.0 许可的库链接，前提是其余所有代码均遵守 GPL。
 
-Release APK 静态链接了 pjsip（GPL-2.0-or-later）和 OpenSSL（Apache-2.0），见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+Release APK 静态链接了 pjsip（GPL-2.0-or-later）、OpenSSL（Apache-2.0）和 libopus（BSD-3-Clause），见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 每个 release 对应的源码是本仓库对应 tag 的提交，加上 `sip-pjsua2/native/build-pjsua2.sh` 下载的版本固定的上游源码包。
 
 ## 免责声明

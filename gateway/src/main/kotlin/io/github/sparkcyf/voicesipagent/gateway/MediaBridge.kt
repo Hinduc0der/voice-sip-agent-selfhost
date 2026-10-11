@@ -2,6 +2,7 @@ package io.github.sparkcyf.voicesipagent.gateway
 
 import io.github.sparkcyf.voicesipagent.voice.FrameClockListener
 import io.github.sparkcyf.voicesipagent.voice.MediaPort
+import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import io.github.sparkcyf.voicesipagent.voice.VoiceFormat
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -13,6 +14,9 @@ import java.util.concurrent.TimeUnit
  * internal 20 ms ticker is used.
  */
 class MediaBridge(private val a: MediaPort, private val b: MediaPort) {
+    init {
+        require(a.format == b.format) { "Media formats differ: ${a.format} / ${b.format}" }
+    }
     private val master: MediaPort? = if (a.isClockSource) a else if (b.isClockSource) b else null
     private var ticker: ScheduledExecutorService? = null
 
@@ -60,12 +64,12 @@ class MediaBridge(private val a: MediaPort, private val b: MediaPort) {
 
     companion object {
         /** Echo test: whatever [port] captures is sent straight back to it. */
-        fun loopback(port: MediaPort): MediaBridge = MediaBridge(port, LoopbackPort())
+        fun loopback(port: MediaPort): MediaBridge = MediaBridge(port, LoopbackPort(port.format))
     }
 
     /** Clockless port that returns what was last written to it (one frame of delay). */
-    private class LoopbackPort : MediaPort {
-        @Volatile private var last = VoiceFormat.silence()
+    private class LoopbackPort(override val format: PcmFormat) : MediaPort {
+        @Volatile private var last = format.silence()
         override val isClockSource = false
         override fun setClockListener(listener: FrameClockListener?) {}
         override fun readFrame(): ShortArray = last

@@ -170,23 +170,53 @@ internal object PjsuaLib {
             decor = pj_log_decoration.PJ_LOG_HAS_SENDER.toLong()
         }
         cfg.medConfig.apply {
-            // Conference bridge at the tap's native format: 8 kHz mono, 20 ms. No resampling, no EC/VAD.
-            clockRate = 8000
-            sndClockRate = 8000
+            // Match the 16 kHz mono tap/bridge, 20 ms. PJMEDIA resamples for G.711.
+            // EC belongs at the remote microphone endpoint. Permit per-codec VAD below;
+            // noVad=true would override the Opus setting when PJSUA creates a stream.
+            clockRate = 16000
+            sndClockRate = 16000
             channelCount = 1
             audioFramePtime = 20
             ptime = 20
-            noVad = true
+            noVad = false
             ecTailLen = 0
         }
         ep.libInit(cfg)
         cfg.delete()
+        // Opus maps VAD to its built-in DTX. G.711 must continue sending audio frames.
+        for ((id, vad) in listOf("opus/48000/2" to true, "PCMU/8000" to false, "PCMA/8000" to false)) {
+            val param = ep.codecGetParam(id)
+            val setting = param.setting
+            try {
+                setting.vad = vad
+                ep.codecSetParam(id, param)
+            } finally {
+                setting.delete()
+                param.delete()
+            }
+        }
+        val opus = ep.codecOpusConfig
+        try {
+            opus.sample_rate = 16000
+            opus.channel_cnt = 1
+            opus.frm_ptime = 20
+            opus.frm_ptime_denum = 1
+            opus.bit_rate = 20000
+            opus.complexity = 5
+            opus.cbr = false
+            // Regenerates Opus fmtp from its codec parameters, including usedtx=1.
+            ep.codecOpusConfig = opus
+        } finally {
+            opus.delete()
+        }
         ep.libStart()
         // No sound device at all: the null device's master port clocks the conference bridge.
         ep.audDevManager().setNullDev()
-        ep.codecSetPriority("PCMU/8000", 255)
-        ep.codecSetPriority("PCMA/8000", 254)
-        ep.codecSetPriority("G722/16000", 0)
+        // RFC 7587 requires opus/48000/2 in SDP even for mono 16 kHz audio. PJMEDIA's
+        // Opus config supplies maxplaybackrate/sprop-maxcapturerate=16000 in fmtp.
+        ep.codecSetPriority("opus/48000/2", 255)
+        ep.codecSetPriority("PCMU/8000", 254)
+        ep.codecSetPriority("PCMA/8000", 253)
         log.info("pjsua2 ${ep.libVersion().full} started")
     }
 

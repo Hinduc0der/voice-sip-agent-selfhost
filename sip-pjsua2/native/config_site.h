@@ -11,6 +11,11 @@
 #define PJ_HAS_IPV6                         1
 #define PJMEDIA_HAS_SRTP                    1
 
+/* Opus keeps its mandatory 48 kHz RTP clock, but encodes/decodes 16 kHz mono PCM.
+ * Keep resampling available between the 16 kHz cellular bridge and G.711. */
+#define PJMEDIA_CODEC_OPUS_DEFAULT_SAMPLE_RATE 16000
+#define PJMEDIA_CODEC_OPUS_DEFAULT_BIT_RATE    20000
+
 /* Gateway: few simultaneous calls, small footprint. */
 #define PJSUA_MAX_CALLS                     4
 #define PJSUA_MAX_ACC                       4

@@ -14,7 +14,7 @@ android {
         minSdk = 34
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.2.0"
     }
 
     // Release signing comes from ~/.gradle/gradle.properties (never from the repo); without it the

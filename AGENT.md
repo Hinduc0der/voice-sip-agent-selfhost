@@ -21,7 +21,7 @@ pjsua2, public calls over cellular data only (Wi-Fi off).
 ## Common commands
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh                # once / on upgrade: builds OpenSSL 3.5.8 + pjproject 2.17 (arm64) into git-ignored src/generated/
+sip-pjsua2/native/build-pjsua2.sh                # once / on upgrade: builds OpenSSL 3.5.8 + libopus 1.6.1 + pjproject 2.17 (arm64) into git-ignored src/generated/
 ./gradlew :sip:test :gateway:test                # JVM unit tests (no native build needed)
 ./gradlew :sip-pjsua2:testDebugUnitTest          # INVITE parsing etc.
 ./gradlew :sip:test --tests 'io.github.sparkcyf.voicesipagent.sip.SipMessageTest'          # single test class
@@ -64,8 +64,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
 `:privileged`, `:sip-pjsua2` (Android); `:app` wires everything together.
 
 - **Contract (`:voice-api`)**: `CallEndpoint` (`dial()` never throws; failures come back as an ENDED leg),
-  `CallLeg` (state only moves forward: NEW→PROCEEDING→RINGING→CONNECTED→ENDED), `MediaPort` (8 kHz mono PCM16,
-  20 ms = 160 samples = 320 bytes, `readFrame()` never blocks). A new voice/control integration = one more
+  `CallLeg` (state only moves forward: NEW→PROCEEDING→RINGING→CONNECTED→ENDED), `MediaPort` (mono PCM16,
+  20 ms, fixed `PcmFormat` per port: 8 kHz = 160 samples/320 bytes, 16 kHz = 320 samples/640 bytes;
+  `readFrame()` never blocks). Both ports must match; the bridge rejects mismatches. A new voice/control integration = one more
   `CallEndpoint`; the core does not change.
 - **`CallBridge` (`:gateway`)**: bridges any two endpoints. An inbound call on side A first dials side B, and
   **A is answered only after B answers**; timeouts/failures map to a `HangupCause` rejection. `EchoEndpoint` is
@@ -83,6 +84,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   AIDL interface `IPrivilegedService`. Call audio is handed to the app over a **SOCK_SEQPACKET socketpair**
   (one packet = one frame); the app side is `PcmSocketPort` (the clock source). The UserService `version` is the
   APK's `lastUpdateTime`, so every reinstall restarts the shell process and loads the new code.
+  `openCallAudio(method, sampleRate)` uses 8 kHz for Kotlin SIP and 16 kHz for pjsua2, including loopback.
+  There is no rate fallback; existing official/legacy method selection and same-rate setup retries remain.
+  The new 16 kHz tap has not yet been verified on a device.
 - **SIP (`:sip`)**: UDP; all protocol state runs on a single `sip-ua` scheduler thread (`post {}`). Outbound calls
   carry the caller number in `P-Asserted-Identity`; for inbound calls the cellular number to dial comes from the
   `X-VSA-Dial` header, falling back to the Request-URI user part. PCMU/PCMA + telephone-event(101) only.
@@ -93,7 +97,13 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     `libHandleEvents`).
   - **No Android sound-device backend is compiled in** — only the null sound device, so pjsua never touches
     AudioManager or the audio mode. Audio enters/leaves the conference bridge through `AudioMediaPort`
-    (`ConfPort`, 8 kHz / 20 ms, no resampling, no EC/VAD); a `FrameFifo` of at most 5 frames on each side absorbs
+    (`ConfPort`, 16 kHz / 20 ms, no EC). Opus uses 16 kHz mono PCM (20 kbit/s target);
+    PJMEDIA resamples for PCMU/PCMA fallback. G.722 is disabled. Keep the resampler compiled in.
+    VAD/DTX is enabled only for Opus; PCMU/PCMA have VAD disabled. Global `noVad=false` allows the
+    per-codec settings to apply. Set the codec parameters before `codecOpusConfig`, which regenerates
+    Opus fmtp (`usedtx=1`); PJSIP honors the peer's negotiated `usedtx`. PCM clocks stay at 20 ms.
+    Quiet speech, tones/hold music and prolonged-silence PBX/NAT behavior remain unverified on devices.
+    A `FrameFifo` of at most 5 frames on each side absorbs
     the drift between the two clocks.
   - SWIG objects (Call/Account/AudioMediaPort) must be `delete()`d explicitly on the pjsua thread, and never from
     inside their own callback (`finish()` defers the delete to the next loop). `Account`: `shutdown()` before

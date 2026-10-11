@@ -25,6 +25,7 @@ import io.github.sparkcyf.voicesipagent.voice.CallEndpoint
 import io.github.sparkcyf.voicesipagent.voice.EndpointStatus
 import io.github.sparkcyf.voicesipagent.voice.HangupCause
 import io.github.sparkcyf.voicesipagent.voice.LegState
+import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import io.github.sparkcyf.voicesipagent.voice.redactNumber
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -70,7 +71,10 @@ class GatewayRuntime private constructor(context: Context) {
     val health: StateFlow<HealthState> = _health
 
     val shizuku = ShizukuConnector(app) { AppLog.i(it) }
-    val cellular = CellularEndpoint(app, PrivilegedAudioOpener(shizuku, { settings.audioMethod }, { settings.muteEarpiece })) {
+    private fun audioFormat() = if (settings.sipStack == SipStack.PJSUA2)
+        PcmFormat.WIDEBAND else PcmFormat.NARROWBAND
+
+    val cellular = CellularEndpoint(app, PrivilegedAudioOpener(shizuku, { settings.audioMethod }, { settings.muteEarpiece }, ::audioFormat)) {
         AppLog.i(it)
     }
     /** [SipUserAgent] or [PjsipEndpoint], per [GatewaySettings.sipStack]. */
@@ -272,7 +276,7 @@ class GatewayRuntime private constructor(context: Context) {
             return
         }
         val loopback = _health.value.loopbackTest
-        val sideB: CallEndpoint? = if (loopback) EchoEndpoint() else sip
+        val sideB: CallEndpoint? = if (loopback) EchoEndpoint(format = audioFormat()) else sip
         if (sideB == null) {
             bridge = null
             AppLog.i("bridge idle: SIP not configured")

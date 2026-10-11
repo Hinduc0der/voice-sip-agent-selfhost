@@ -24,11 +24,12 @@ interface IPrivilegedService {
 
     /**
      * Opens the call-audio tap (only valid while a call is ACTIVE) and returns the app end of a
-     * SOCK_SEQPACKET pair: each packet is one 20 ms frame of 8 kHz mono PCM16LE. Reads deliver
+     * SOCK_SEQPACKET pair: each packet is one 20 ms frame of mono PCM16LE at sampleRate. Reads deliver
      * downlink (far end), writes are injected into the uplink. Closing either end stops the tap.
      * method: 0 = auto, 1 = official interception API, 2 = legacy VOICE_DOWNLINK/TYPE_TELEPHONY.
+     * sampleRate: 8000 or 16000; failures are reported without retrying at a different rate.
      */
-    ParcelFileDescriptor openCallAudio(int method) = 4;
+    ParcelFileDescriptor openCallAudio(int method, int sampleRate) = 4;
 
     void closeCallAudio() = 5;
 

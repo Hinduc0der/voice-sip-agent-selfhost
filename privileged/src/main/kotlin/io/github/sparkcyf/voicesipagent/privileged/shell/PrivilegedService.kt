@@ -82,13 +82,14 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     }
 
     @Synchronized
-    override fun openCallAudio(method: Int): ParcelFileDescriptor {
+    override fun openCallAudio(method: Int, sampleRate: Int): ParcelFileDescriptor {
         enforceCaller()
         closeCallAudio()
-        val t = CallAudioTap(shellCtx, method) { restoreLocal("tap closed") }
+        val t = CallAudioTap(shellCtx, method, sampleRate) { restoreLocal("tap closed") }
         return try {
             t.open().also { tap = t }
         } catch (e: Throwable) {
+            lastTapStats = t.stats()
             Log.w(TAG, "openCallAudio failed: $e")
             throw IllegalStateException(e.message ?: e.toString())
         }

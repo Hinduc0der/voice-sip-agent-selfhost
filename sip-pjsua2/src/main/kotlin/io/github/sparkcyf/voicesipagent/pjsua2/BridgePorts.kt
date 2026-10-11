@@ -2,6 +2,7 @@ package io.github.sparkcyf.voicesipagent.pjsua2
 
 import io.github.sparkcyf.voicesipagent.voice.FrameClockListener
 import io.github.sparkcyf.voicesipagent.voice.MediaPort
+import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import io.github.sparkcyf.voicesipagent.voice.VoiceFormat
 import org.pjsip.pjsua2.AudioMediaPort
 import org.pjsip.pjsua2.MediaFormatAudio
@@ -47,6 +48,7 @@ internal class FrameFifo(private val maxFrames: Int = 5) {
 
 /** The gateway-facing side of a pjsip call: clockless, fed and drained by [ConfPort]. */
 internal class PjsipMediaPort : MediaPort {
+    override val format = PcmFormat.WIDEBAND
     val fromSip = FrameFifo()
     val toSip = FrameFifo()
 
@@ -61,9 +63,10 @@ internal class PjsipMediaPort : MediaPort {
             fromSip.clear()
             fromSip.counting = true
         }
-        return fromSip.pop() ?: VoiceFormat.silence()
+        return fromSip.pop() ?: format.silence()
     }
     override fun writeFrame(frame: ShortArray) {
+        require(frame.size == format.frameSamples)
         toSip.counting = true
         toSip.push(frame)
     }
@@ -72,25 +75,26 @@ internal class PjsipMediaPort : MediaPort {
 }
 
 /**
- * A conference-bridge port that exchanges 8 kHz/20 ms PCM with [media]. Its callbacks run on pjmedia's
+ * A conference-bridge port that exchanges 16 kHz/20 ms PCM with [media]. Its callbacks run on pjmedia's
  * clock thread and only touch the FIFOs, never pjsua.
  */
 internal class ConfPort(private val media: PjsipMediaPort) : AudioMediaPort() {
-    private val rx = ByteArray(VoiceFormat.FRAME_BYTES)
-    private val tx = ByteArray(VoiceFormat.FRAME_BYTES)
+    private val format = media.format
+    private val rx = ByteArray(format.frameBytes)
+    private val tx = ByteArray(format.frameBytes)
 
     /** Must run on the pjsua thread. */
     fun register(name: String) {
         val fmt = MediaFormatAudio()
-        fmt.init(PJMEDIA_FORMAT_L16, VoiceFormat.SAMPLE_RATE.toLong(), 1, VoiceFormat.FRAME_MS * 1000, 16, 0, 0)
+        fmt.init(PJMEDIA_FORMAT_L16, format.sampleRate.toLong(), 1, VoiceFormat.FRAME_MS * 1000, 16, 0, 0)
         createPort(name, fmt)
         fmt.delete()
     }
 
     /** Conference wants audio to send towards the SIP peer. */
     override fun onFrameRequested(frame: MediaFrame) {
-        val f = media.toSip.pop() ?: VoiceFormat.silence()
-        VoiceFormat.encodeLe(f, tx)
+        val f = media.toSip.pop() ?: format.silence()
+        format.encodeLe(f, tx)
         frame.buf.assignBytes(tx)
         frame.size = tx.size.toLong()
         frame.type = pjmedia_frame_type.PJMEDIA_FRAME_TYPE_AUDIO
@@ -99,8 +103,8 @@ internal class ConfPort(private val media: PjsipMediaPort) : AudioMediaPort() {
     /** Audio from the SIP peer, already decoded and mixed by the conference bridge. */
     override fun onFrameReceived(frame: MediaFrame) {
         if (frame.type != pjmedia_frame_type.PJMEDIA_FRAME_TYPE_AUDIO) return
-        if (frame.buf.copyBytes(rx) < VoiceFormat.FRAME_BYTES) return
-        media.fromSip.push(VoiceFormat.decodeLe(rx))
+        if (frame.buf.copyBytes(rx) < format.frameBytes) return
+        media.fromSip.push(format.decodeLe(rx))
     }
 
     companion object {

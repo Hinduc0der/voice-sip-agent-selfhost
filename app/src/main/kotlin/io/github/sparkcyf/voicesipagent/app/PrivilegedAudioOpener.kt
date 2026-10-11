@@ -4,17 +4,20 @@ import io.github.sparkcyf.voicesipagent.privileged.PcmSocketPort
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 import io.github.sparkcyf.voicesipagent.telephony.CallAudioHandle
 import io.github.sparkcyf.voicesipagent.telephony.CallAudioOpener
+import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 
 /** Glue: the telephony layer's audio source, backed by the Shizuku shell service. */
 class PrivilegedAudioOpener(
     private val shizuku: ShizukuConnector,
     private val method: () -> Int,
     private val muteEarpiece: () -> Boolean,
+    private val format: () -> PcmFormat,
 ) : CallAudioOpener {
     override fun open(onLost: (String) -> Unit): CallAudioHandle {
         val svc = shizuku.service ?: error("privileged service not connected (${shizuku.state})")
-        val pfd = svc.openCallAudio(method())
-        val port = PcmSocketPort(pfd, onLost).also { it.start() }
+        val pcm = format()
+        val pfd = svc.openCallAudio(method(), pcm.sampleRate)
+        val port = PcmSocketPort(pfd, pcm, onLost).also { it.start() }
         AppLog.i("call audio tap opened: ${svc.audioStats()}")
         if (muteEarpiece()) {
             // Best effort: a failure here only means the handset stays audible.

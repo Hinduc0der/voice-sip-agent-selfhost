@@ -12,14 +12,18 @@ import io.github.sparkcyf.voicesipagent.voice.LegDirection
 import io.github.sparkcyf.voicesipagent.voice.LegState
 import io.github.sparkcyf.voicesipagent.voice.MediaPort
 import io.github.sparkcyf.voicesipagent.voice.Party
-import io.github.sparkcyf.voicesipagent.voice.VoiceFormat
+import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import java.util.concurrent.CopyOnWriteArrayList
 
-class FakePort(override val isClockSource: Boolean, private val fill: Short) : MediaPort {
+class FakePort(
+    override val isClockSource: Boolean,
+    private val fill: Short,
+    override val format: PcmFormat = PcmFormat.NARROWBAND,
+) : MediaPort {
     var clock: FrameClockListener? = null
     val written = CopyOnWriteArrayList<ShortArray>()
     override fun setClockListener(listener: FrameClockListener?) { clock = listener }
-    override fun readFrame() = ShortArray(VoiceFormat.FRAME_SAMPLES) { fill }
+    override fun readFrame() = ShortArray(format.frameSamples) { fill }
     override fun writeFrame(frame: ShortArray) { written += frame }
 }
 
