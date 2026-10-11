@@ -208,6 +208,14 @@ sip-pjsua2/native/build-pjsua2.sh   # once: OpenSSL + libopus + pjproject for ar
 The native build script downloads pinned, SHA-256-verified upstream tarballs and applies the patches in
 `sip-pjsua2/native/`.
 
+Native C/C++ code uses ThinLTO, hidden visibility and section garbage collection. The final export map
+exposes only PJSUA2 JNI entry points; OpenSSL, Opus and PJSIP symbols are local. The build checks exports
+and writes `pjsua2.exports.txt` under the ABI work directory. Exported JNI wrappers and OpenSSL's internal
+algorithm registries still retain reachable code; Java shrinking alone does not remove native wrappers.
+Release builds enable R8 with consumer rules preserving SWIG bindings/director callbacks and Shizuku's
+reflectively loaded service constructor. Other app and dependency code can be optimized. Validate a release
+APK's Shizuku startup, SIP callbacks and TLS/SRTP audio before relying on new shrinking rules.
+
 Release builds are signed only when `vsa.signing.storeFile`, `vsa.signing.storePassword`, `vsa.signing.keyAlias`
 and `vsa.signing.keyPassword` are set in `~/.gradle/gradle.properties`; otherwise `assembleRelease` produces an
 unsigned APK.

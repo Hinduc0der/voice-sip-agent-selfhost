@@ -187,6 +187,12 @@ sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSS
 
 原生构建脚本会下载版本固定、经 SHA-256 校验的上游源码包，并应用 `sip-pjsua2/native/` 中的补丁。
 
+原生 C/C++ 使用 ThinLTO、隐藏符号可见性和 section 垃圾回收。最终导出表仅保留 PJSUA2 JNI 入口，
+OpenSSL、Opus 和 PJSIP 符号均为本地符号。构建会检查导出表，并在 ABI 工作目录生成 `pjsua2.exports.txt`。
+JNI 包装入口和 OpenSSL 内部算法注册表仍会保留可达代码；仅缩减 Java 不会删除原生包装入口。
+Release 构建启用 R8，通过 consumer rules 保留 SWIG 绑定、director 回调及 Shizuku 反射加载的服务构造函数，
+其余应用和依赖代码可以优化。修改缩减规则后，应验证 release APK 的 Shizuku 启动、SIP 回调和 TLS/SRTP 音频。
+
 只有在 `~/.gradle/gradle.properties` 中设置了 `vsa.signing.storeFile`、`vsa.signing.storePassword`、
 `vsa.signing.keyAlias`、`vsa.signing.keyPassword` 时，release 构建才会签名；否则 `assembleRelease` 产出未签名的 APK。
 

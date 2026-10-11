@@ -17,6 +17,9 @@ OPUS_VERSION=1.6.1
 OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
 ABIS=${ABIS:-arm64-v8a}
 APP_PLATFORM=${APP_PLATFORM:-android-34}
+# Use one NDK toolchain for ThinLTO across all static dependencies and the JNI wrapper.
+NATIVE_CFLAGS="-O2 -fPIC -flto=thin -ffunction-sections -fdata-sections -fvisibility=hidden"
+NATIVE_LDFLAGS="-flto=thin -Wl,--gc-sections"
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 MODULE=$(dirname "$HERE")
@@ -47,6 +50,7 @@ if [ ! -f "$OPUS_TARBALL" ]; then
 fi
 echo "$OPUS_SHA256  $OPUS_TARBALL" | shasum -a 256 -c -
 HOST_TAG=$(ls "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt" | head -1)
+LLVM_BIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin"
 API=${APP_PLATFORM#android-}
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
@@ -73,9 +77,11 @@ for ABI in $ABIS; do
   tar xzf "$OSSL_TARBALL" -C "$WORK/$ABI"
   (
     cd "$WORK/$ABI/openssl-$OSSL_VERSION"
-    export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin:$PATH"
+    export PATH="$LLVM_BIN:$PATH"
+    export AR="$LLVM_BIN/llvm-ar" RANLIB="$LLVM_BIN/llvm-ranlib"
     ./Configure "$OSSL_TARGET" -D__ANDROID_API__="$API" no-shared no-tests no-apps no-docs no-engine \
-      no-comp no-ssl3 no-weak-ssl-ciphers --prefix="$SSL_PREFIX" --openssldir=/nonexistent --libdir=lib
+      no-comp no-ssl3 no-weak-ssl-ciphers --prefix="$SSL_PREFIX" --openssldir=/nonexistent --libdir=lib \
+      $NATIVE_CFLAGS
     make -j"$JOBS" build_libs
     make install_dev
   )
@@ -84,10 +90,9 @@ for ABI in $ABIS; do
   tar xzf "$OPUS_TARBALL" -C "$WORK/$ABI"
   (
     cd "$WORK/$ABI/opus-$OPUS_VERSION"
-    TOOLCHAIN="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/$HOST_TAG/bin"
-    export CC="$TOOLCHAIN/${OPUS_CC_TARGET}${API}-clang"
-    export AR="$TOOLCHAIN/llvm-ar" RANLIB="$TOOLCHAIN/llvm-ranlib" STRIP="$TOOLCHAIN/llvm-strip"
-    CFLAGS="-O2 -fPIC" ./configure --host="$OPUS_HOST" --prefix="$OPUS_PREFIX" \
+    export CC="$LLVM_BIN/${OPUS_CC_TARGET}${API}-clang"
+    export AR="$LLVM_BIN/llvm-ar" RANLIB="$LLVM_BIN/llvm-ranlib" STRIP="$LLVM_BIN/llvm-strip"
+    CFLAGS="$NATIVE_CFLAGS" LDFLAGS="$NATIVE_LDFLAGS" ./configure --host="$OPUS_HOST" --prefix="$OPUS_PREFIX" \
       --disable-shared --enable-static --with-pic --disable-doc --disable-extra-programs
     make -j"$JOBS"
     make install
@@ -104,6 +109,9 @@ for ABI in $ABIS; do
 
   (
     cd "$SRC"
+    # configure-android replaces CXXFLAGS, but carries CPPFLAGS into both C and C++.
+    export CPPFLAGS="${CPPFLAGS:-} $NATIVE_CFLAGS"
+    export LDFLAGS="${LDFLAGS:-} $NATIVE_LDFLAGS"
     TARGET_ABI=$ABI APP_PLATFORM=$APP_PLATFORM ./configure-android --use-ndk-cflags \
       --with-ssl="$SSL_PREFIX" --with-opus="$OPUS_PREFIX" \
       --disable-sound --disable-video --disable-upnp \
@@ -117,10 +125,19 @@ for ABI in $ABIS; do
     grep -q "PJMEDIA_HAS_OPUS_CODEC 1" pjmedia/include/pjmedia-codec/config_auto.h || { echo "Opus not enabled" >&2; exit 1; }
     grep -q "PJMEDIA_HAS_G722_CODEC 0" pjmedia/include/pjmedia-codec/config_auto.h || { echo "G.722 not disabled" >&2; exit 1; }
     make -j"$JOBS"
-    make -C pjsip-apps/src/swig/java
+    # Localize dependencies only at the shared JNI link, not configure's executables.
+    make -C pjsip-apps/src/swig/java \
+      LDFLAGS="$LDFLAGS -Wl,--version-script=$HERE/pjsua2.exports.map -Wl,--exclude-libs,ALL"
   )
 
   OUT="$SRC/pjsip-apps/src/swig/java/android/pjsua2/src/main"
+  LIB="$OUT/jniLibs/$ABI/libpjsua2.so"
+  EXPORTS="$WORK/$ABI/pjsua2.exports.txt"
+  "$LLVM_BIN/llvm-nm" -D --defined-only --extern-only "$LIB" > "$EXPORTS"
+  grep -q 'Java_org_pjsip_pjsua2_pjsua2JNI_' "$EXPORTS" || { echo "JNI exports missing" >&2; exit 1; }
+  awk '$NF !~ /^(Java_org_pjsip_pjsua2_pjsua2JNI_|JNI_OnLoad$|JNI_OnUnload$)/ {
+         print "Unexpected native export: " $NF > "/dev/stderr"; bad=1
+       } END { exit bad }' "$EXPORTS"
   mkdir -p "$GEN_LIBS/$ABI"
   cp "$OUT/jniLibs/$ABI/"*.so "$GEN_LIBS/$ABI/"
   # Java sources are ABI independent; the last ABI's copy wins.

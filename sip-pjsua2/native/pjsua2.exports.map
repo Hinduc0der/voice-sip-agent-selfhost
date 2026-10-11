@@ -1,0 +1,10 @@
+/* Keep JNI lookup names visible; localize static dependencies and C++ internals.
+ * Wildcards tolerate SWIG versions that do not emit JNI lifecycle hooks. */
+{
+    global:
+        Java_org_pjsip_pjsua2_pjsua2JNI_*;
+        JNI_OnLoad*;
+        JNI_OnUnload*;
+    local:
+        *;
+};

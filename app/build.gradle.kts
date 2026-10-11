@@ -34,8 +34,9 @@ android {
         release {
             signingConfig = releaseSigning
             optimization {
-                enable = false
+                enable = true
             }
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
         }
     }
     compileOptions {

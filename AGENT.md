@@ -113,6 +113,12 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   - Build patches (`native/`): `config_site.h`, `pjsua2-java-ext.i` (bulk-copy typemap for ByteVector; must come
     before `%template(ByteVector)`; SWIG director threads stay attached), `pjsip-tls-wildcard.patch` (RFC 6125
     wildcard certificate matching). pjsua's log callback is gated by `consoleLevel`, not just stdout.
+  - Native dependencies and the wrapper use NDK ThinLTO and section GC. `pjsua2.exports.map` localizes
+    everything except JNI entry points; `build-pjsua2.sh` checks the final dynamic export table.
+    Exported SWIG wrappers remain native reachability roots; R8 does not prune them.
+  - Release R8 is enabled. Module consumer rules preserve generated SWIG classes, director callback
+    overrides and the Shizuku `PrivilegedService(Context)` reflection entry point. Do not remove these
+    rules without auditing generated JNI lookups and testing a release APK in both app and shell processes.
 - **Runtime (`:app`)**: `GatewayRuntime` singleton; every state-changing operation runs on the single-threaded
   `gateway-runtime` executor. It is started from `GatewayApp.onCreate` (Telecom may start the process just to bind
   the InCallService). A health check runs every 60 s and re-runs setup if the companion override is lost.

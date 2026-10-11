@@ -9,6 +9,7 @@ android {
     }
     defaultConfig {
         minSdk = 34
+        consumerProguardFiles("consumer-rules.pro")
         ndk {
             abiFilters += "arm64-v8a"
         }
