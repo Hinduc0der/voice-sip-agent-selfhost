@@ -187,6 +187,15 @@ sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSS
 
 原生构建脚本会下载版本固定、经 SHA-256 校验的上游源码包，并应用 `sip-pjsua2/native/` 中的补丁。
 
+源码包和共享依赖库的源码树直接放在 `sip-pjsua2/build/pjproject/`
+顶层（可用 `PJ_WORK` 指定其他目录）。每个 ABI 下保留 `openssl-build/`、`opus-build/`、
+`prefix/{openssl,opus}/` 和独立的 PJSIP 源码/构建目录，因为 PJSIP 的构建系统会在源码树内生成目标相关的配置和头文件。
+例如，设置 `ABIS="arm64-v8a x86_64"` 可依次构建多个目标；APK 实际包含的 ABI 仍由 Gradle 的 ABI filters 决定。
+每次都会重新创建指定的 ABI 目录并完整构建，包括依赖安装目录、PJSIP 补丁和 JNI 产物。
+共享依赖源码和经校验的源码包会保留；不使用构建指纹或增量目标文件缓存。
+所有 ABI 成功后才发布暂存的绑定，构建失败会保留原有产物。
+不要同时运行共用工作目录或输出目录的构建。
+
 原生 C/C++ 使用 ThinLTO、隐藏符号可见性和 section 垃圾回收。最终导出表仅保留 PJSUA2 JNI 入口，
 OpenSSL、Opus 和 PJSIP 符号均为本地符号。构建会检查导出表，并在 ABI 工作目录生成 `pjsua2.exports.txt`。
 JNI 包装入口和 OpenSSL 内部算法注册表仍会保留可达代码；仅缩减 Java 不会删除原生包装入口。

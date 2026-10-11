@@ -208,6 +208,17 @@ sip-pjsua2/native/build-pjsua2.sh   # once: OpenSSL + libopus + pjproject for ar
 The native build script downloads pinned, SHA-256-verified upstream tarballs and applies the patches in
 `sip-pjsua2/native/`.
 
+Tarballs and shared library source trees live directly under
+`sip-pjsua2/build/pjproject/` (override with `PJ_WORK`). Each ABI has `openssl-build/`, `opus-build/`,
+`prefix/{openssl,opus}/` and its own PJSIP source/build tree, since PJSIP generates target-specific
+configuration and headers inside its source tree. Set, for example,
+`ABIS="arm64-v8a x86_64"` to build multiple targets sequentially; APK packaging still follows Gradle's ABI filters.
+Each requested ABI directory is recreated and rebuilt from scratch, including dependency installations,
+PJSIP patches and JNI output. Shared dependency sources and verified tarballs are retained; there are no
+build fingerprints or incremental object caches. New bindings are staged and published only after all
+requested ABIs succeed, preserving the previous output on a build failure. Do not run builds sharing the
+same work/output directories concurrently.
+
 Native C/C++ code uses ThinLTO, hidden visibility and section garbage collection. The final export map
 exposes only PJSUA2 JNI entry points; OpenSSL, Opus and PJSIP symbols are local. The build checks exports
 and writes `pjsua2.exports.txt` under the ABI work directory. Exported JNI wrappers and OpenSSL's internal

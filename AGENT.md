@@ -21,7 +21,7 @@ pjsua2, public calls over cellular data only (Wi-Fi off).
 ## Common commands
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh                # once / on upgrade: builds OpenSSL 3.5.8 + libopus 1.6.1 + pjproject 2.17 (arm64) into git-ignored src/generated/
+sip-pjsua2/native/build-pjsua2.sh                # once / on upgrade: builds OpenSSL 3.5.9 + libopus 1.6.1 + pjproject 2.17 (arm64) into git-ignored src/generated/
 ./gradlew :sip:test :gateway:test                # JVM unit tests (no native build needed)
 ./gradlew :sip-pjsua2:testDebugUnitTest          # INVITE parsing etc.
 ./gradlew :sip:test --tests 'io.github.sparkcyf.voicesipagent.sip.SipMessageTest'          # single test class
@@ -116,6 +116,12 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   - Native dependencies and the wrapper use NDK ThinLTO and section GC. `pjsua2.exports.map` localizes
     everything except JNI entry points; `build-pjsua2.sh` checks the final dynamic export table.
     Exported SWIG wrappers remain native reachability roots; R8 does not prune them.
+    Tarballs and shared OpenSSL/Opus sources live at the work directory's top level; ABI directories
+    hold out-of-tree dependency builds, `prefix/{openssl,opus}` and isolated PJSIP source/build trees.
+    Each requested ABI directory is recreated and built from scratch, including dependency installations,
+    PJSIP patches and JNI output. Shared sources are retained; there is no build fingerprinting/object reuse.
+    Tarball SHA-256 checks remain. Generated Java/JNI output is published after all ABIs succeed.
+    Do not run concurrent builds sharing the same work/output directories.
   - Release R8 is enabled. Module consumer rules preserve generated SWIG classes, director callback
     overrides and the Shizuku `PrivilegedService(Context)` reflection entry point. Do not remove these
     rules without auditing generated JNI lookups and testing a release APK in both app and shell processes.
