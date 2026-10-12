@@ -11,10 +11,15 @@ android {
 
     defaultConfig {
         applicationId = "io.github.sparkcyf.voicesipagent"
-        minSdk = 34
+        minSdk = 30
         targetSdk = 36
-        versionCode = 1
+        versionCode = 2
         versionName = "0.2.0"
+        // Filter all transitive JNI libraries as well as PJSIP's own module outputs.
+        ndk {
+            //abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += "arm64-v8a"
+        }
     }
 
     // Release signing comes from ~/.gradle/gradle.properties (never from the repo); without it the
@@ -58,6 +63,8 @@ dependencies {
     implementation(project(":gateway"))
     implementation(project(":telephony"))
     implementation(project(":privileged"))
+    // Declared by this module's manifest; keep it on the app compile classpath for lint.
+    implementation(libs.shizuku.provider)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

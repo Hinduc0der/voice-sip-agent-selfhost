@@ -8,7 +8,7 @@ android {
         version = release(37)
     }
     defaultConfig {
-        minSdk = 34
+        minSdk = 30
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import android.os.Build
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -25,7 +26,11 @@ class GatewayService : Service() {
         super.onCreate()
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "Gateway status", NotificationManager.IMPORTANCE_LOW))
-        startForeground(NOTIFICATION_ID, build("starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION_ID, build("starting"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else {
+            startForeground(NOTIFICATION_ID, build("starting"))
+        }
         val runtime = GatewayRuntime.get(this)
         runtime.start()
         scope.launch {

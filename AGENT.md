@@ -55,8 +55,11 @@ adb shell "am broadcast -n $R --es op provision --es prefixes ''"   # empty stri
 git-ignored `sip_secret` and runs a live call test. Do not point it at the gateway's own trunk account: with
 `remove_existing=yes` it would kick the phone's registration.
 
-Toolchain: Gradle 9.5.1 wrapper, AGP 9.3 (built-in Kotlin), Kotlin 2.2.10, compileSdk 37, minSdk 34,
-targetSdk 36; JVM modules use `jvmToolchain(17)`.
+Toolchain: Gradle 9.5.1 wrapper, AGP 9.3 (built-in Kotlin), Kotlin 2.2.10, compileSdk 37, minSdk 30,
+targetSdk 36; JVM modules target Java 17 bytecode using the Gradle JDK. The APK packages arm64-v8a and
+x86_64; build both with `ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30` before assembling. To package another ABI, update
+the app's Gradle `abiFilters` and build matching native libraries.
+Android 11–13 compatibility and physical audio are provisional until verified on devices.
 
 ## Architecture
 

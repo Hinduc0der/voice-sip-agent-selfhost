@@ -50,8 +50,10 @@ Quiet speech, call-progress tones, hold music and prolonged silence with PBX/NAT
 device testing. Acoustic echo cancellation belongs at the microphone endpoint.
 The 16 kHz tap and Opus calls have not yet been verified on a device.
 
-Limitations: one call at a time; arm64-v8a only; requires Android 14+
-(minSdk 34), but only the devices above have been tested — hidden APIs may behave differently elsewhere.
+Limitations: one call at a time. The APK packages arm64-v8a and x86_64 and targets Android 11+
+(minSdk 30). Android 11–13 compatibility and physical two-way cellular audio remain unverified;
+only the devices above have been tested. Hidden APIs and modem routing may differ across devices.
+Default-dialer mode provides gateway status and recovery, with a switch-dialer action for manual calling.
 Emergency numbers are always refused and are never dialed through the gateway.
 
 ## Installation

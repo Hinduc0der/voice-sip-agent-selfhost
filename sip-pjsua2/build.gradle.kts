@@ -8,11 +8,8 @@ android {
         version = release(37)
     }
     defaultConfig {
-        minSdk = 34
+        minSdk = 30
         consumerProguardFiles("consumer-rules.pro")
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
     }
     sourceSets {
         getByName("main") {
