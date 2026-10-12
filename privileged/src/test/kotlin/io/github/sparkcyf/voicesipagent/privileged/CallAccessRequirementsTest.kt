@@ -34,7 +34,17 @@ class CallAccessRequirementsTest {
         assertFalse(companion.copy(sdk = 30).ready)
         assertFalse(companion.copy(companionComponent = false).ready)
         assertFalse(companion.copy(companionAppOp = false).ready)
-        assertFalse(companion.copy(companionOverride = false).ready)
+        assertTrue(companion.copy(sdk = 34, companionOverride = false).ready)
+    }
+
+    @Test fun nonUiServiceIsReadyWithoutCompanionOverrideOrDialerRole() {
+        val nonUi = dialer.copy(effective = CallAccess.COMPANION, holdsDialer = false,
+            roleAvailable = false, dialerComponents = false, sdk = 31,
+            companionComponent = true, companionAppOp = true, companionOverride = false)
+        for (sdk in 31..37) assertTrue("API $sdk", nonUi.copy(sdk = sdk).ready)
+        assertFalse(nonUi.copy(companionAppOp = false).ready)
+        assertFalse(nonUi.copy(companionComponent = false).ready)
+        assertFalse(nonUi.copy(callingPermissions = false).ready)
     }
 
     @Test fun automaticModePreservesModernCompanionAndRequiresExplicitDialerSelectionOn30() {

@@ -75,7 +75,7 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   baseband clock); both directions follow that one clock. `RtpSession` has no clock and relies on its jitter
   buffer. A 20 ms ticker is used only when there is no clock source.
 - **Cellular side (`:telephony`)**: call access is either a Telecom **companion InCallService**
-  (CALL_COMPANION_APP + MANAGE_ONGOING_CALLS appop + `cmd telecom add-or-remove-call-companion-app`)
+  (CALL_COMPANION_APP + MANAGE_ONGOING_CALLS appop; setup also attempts `cmd telecom add-or-remove-call-companion-app`)
   or an explicitly selected default-dialer UI service. Audited stock API 30 requires default-dialer mode.
   API 31+ readiness uses the enabled non-UI service and MANAGE_ONGOING_CALLS; it does not require
   a companion override or dialer role. See docs/ANDROID12_SOURCE_AUDIT.md and docs/ANDROID13_SOURCE_AUDIT.md.
@@ -170,8 +170,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
 - **The device is the source of truth for hidden APIs**: `adb pull /system/framework/{framework,services}.jar`,
   extract the dex, and disassemble the target method with `$ANDROID_SDK/build-tools/37.0.0/dexdump -d`
   (e.g. `AudioManager.getCallDownlinkExtractionAudioRecord`, `AudioService.setMode`).
-- The companion override is lost on reboot or a Telecom restart; setup / the health check put it back. After a
-  reboot the phone is in BFU and non-root Shizuku must be restarted by hand; start-on-boot is a non-goal.
+- The companion override is lost on reboot or a Telecom restart; setup attempts to restore it where applicable.
+  Losing it alone does not trigger periodic setup or block API 31+ non-UI access. After a reboot the phone is
+  in BFU and non-root Shizuku must be restarted by hand; start-on-boot is a non-goal.
 
 ## PBX integration
 
