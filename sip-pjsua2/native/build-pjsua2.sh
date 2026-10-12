@@ -6,6 +6,8 @@
 # Tarballs and shared OpenSSL/Opus sources live at the work directory's top level.
 # Dependencies build out of tree; PJSIP keeps an isolated source/build tree per ABI.
 # Each ABI is rebuilt from scratch; shared source trees are retained.
+# Java/JNI wrapper generation runs once per invocation using the common Android binding profile;
+# the generated C++ wrapper is still compiled and linked separately for every ABI.
 # Media: null sound device only (no Android audio backend, so pjsua never touches
 # AudioManager), G.711 + mono Opus (up to 16 kHz), bundled libsrtp and OpenSSL TLS.
 set -euo pipefail
@@ -17,7 +19,7 @@ OSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 OPUS_VERSION=1.6.1
 OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
 ABIS=${ABIS:-arm64-v8a}
-APP_PLATFORM=${APP_PLATFORM:-android-34}
+APP_PLATFORM=${APP_PLATFORM:-android-30}
 # Use one NDK toolchain for ThinLTO across all static dependencies and the JNI wrapper.
 NATIVE_CFLAGS="-O2 -fPIC -flto=thin -ffunction-sections -fdata-sections -fvisibility=hidden"
 NATIVE_LDFLAGS="-flto=thin -Wl,--gc-sections"
@@ -92,6 +94,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir -p "$STAGE/java" "$STAGE/jniLibs"
+SWIG_STAGE="$STAGE/.swig"
+mkdir -p "$SWIG_STAGE"
 
 for ABI in "${ABI_LIST[@]}"; do
   case $ABI in
@@ -168,8 +172,23 @@ for ABI in "${ABI_LIST[@]}"; do
     grep -q "PJMEDIA_HAS_OPUS_CODEC 1" pjmedia/include/pjmedia-codec/config_auto.h || { echo "Opus not enabled" >&2; exit 1; }
     grep -q "PJMEDIA_HAS_G722_CODEC 0" pjmedia/include/pjmedia-codec/config_auto.h || { echo "G.722 not disabled" >&2; exit 1; }
     make -j"$JOBS"
+    SWIG_DIR="$SRC/pjsip-apps/src/swig/java"
+    if [ ! -f "$SWIG_STAGE/pjsua2_wrap.cpp" ]; then
+      # The upstream SWIG flags only select Android/Java, not an ABI. All source trees
+      # use the same config_site.h and interface patch, so Java and wrapper declarations
+      # are shared. Generate through upstream make to retain its flags and include paths.
+      make -C "$SWIG_DIR" output/pjsua2_wrap.cpp
+      cp "$SWIG_DIR/output/pjsua2_wrap.cpp" "$SWIG_DIR/output/pjsua2_wrap.h" "$SWIG_STAGE/"
+      cp -R "$OUT/java/org" "$STAGE/java/"
+    else
+      mkdir -p "$SWIG_DIR/output" "$OUT/java"
+      cp "$SWIG_STAGE/pjsua2_wrap.cpp" "$SWIG_STAGE/pjsua2_wrap.h" "$SWIG_DIR/output/"
+      cp -R "$STAGE/java/org" "$OUT/java/"
+    fi
     # Localize dependencies only at the shared JNI link, not configure's executables.
-    make -C pjsip-apps/src/swig/java \
+    # Treat the generated source as already made, irrespective of extracted header timestamps.
+    # This skips only SWIG; fresh per-ABI objects and JNI libraries must still be built.
+    make -C "$SWIG_DIR" -o output/pjsua2_wrap.cpp \
       LDFLAGS="$LDFLAGS -Wl,--version-script=$HERE/pjsua2.exports.map -Wl,--exclude-libs,ALL"
   )
 
@@ -181,9 +200,9 @@ for ABI in "${ABI_LIST[@]}"; do
        } END { exit bad }' "$EXPORTS"
   mkdir -p "$STAGE/jniLibs/$ABI"
   cp "$OUT/jniLibs/$ABI/"*.so "$STAGE/jniLibs/$ABI/"
-  if [ ! -d "$STAGE/java/org" ]; then cp -R "$OUT/java/org" "$STAGE/java/"; fi
 done
 
+rm -rf "$SWIG_STAGE"
 rm -rf "$GENERATED"
 mv "$STAGE" "$GENERATED"
 STAGE=""

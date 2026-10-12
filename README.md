@@ -216,7 +216,7 @@ configuration:
 Requirements: JDK 17+, Android SDK with NDK, `swig` (e.g. `brew install swig`).
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh   # once: OpenSSL + libopus + pjproject for arm64-v8a, into git-ignored src/generated/
+ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.sh   # once; outputs in git-ignored src/generated/
 ./gradlew :sip:test :gateway:test   # JVM unit tests
 ./gradlew :app:assembleDebug
 ```
@@ -229,10 +229,13 @@ Tarballs and shared library source trees live directly under
 `prefix/{openssl,opus}/` and its own PJSIP source/build tree, since PJSIP generates target-specific
 configuration and headers inside its source tree. Set, for example,
 `ABIS="arm64-v8a x86_64"` to build multiple targets sequentially; APK packaging still follows Gradle's ABI filters.
+Build native libraries for each ABI selected by the app's Gradle filters.
+JVM modules target Java 17 bytecode using the JDK running Gradle; a separate JDK 17 toolchain is not required.
 Each requested ABI directory is recreated and rebuilt from scratch, including dependency installations,
 PJSIP patches and JNI output. Shared dependency sources and verified tarballs are retained; there are no
-build fingerprints or incremental object caches. New bindings are staged and published only after all
-requested ABIs succeed, preserving the previous output on a build failure. Do not run builds sharing the
+build fingerprints or incremental object caches. SWIG generates the Java bindings and C++ wrapper once per
+invocation; the wrapper is compiled and linked separately for each ABI. New bindings are staged and published
+only after all requested ABIs succeed, preserving the previous output on a build failure. Do not run builds sharing the
 same work/output directories concurrently.
 
 Native C/C++ code uses ThinLTO, hidden visibility and section garbage collection. The final export map

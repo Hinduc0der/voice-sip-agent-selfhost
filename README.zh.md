@@ -192,7 +192,7 @@ Flexisip 不需要为网关做任何专门配置：
 需要：JDK 17+，带 NDK 的 Android SDK，`swig`（如 `brew install swig`）。
 
 ```bash
-sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSSL + libopus + pjproject，产物在 git 忽略的 src/generated/
+ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30 sip-pjsua2/native/build-pjsua2.sh   # 只需一次；产物在 git 忽略的 src/generated/
 ./gradlew :sip:test :gateway:test   # JVM 单元测试
 ./gradlew :app:assembleDebug
 ```
@@ -205,6 +205,7 @@ sip-pjsua2/native/build-pjsua2.sh   # 只需一次：为 arm64-v8a 编译 OpenSS
 例如，设置 `ABIS="arm64-v8a x86_64"` 可依次构建多个目标；APK 实际包含的 ABI 仍由 Gradle 的 ABI filters 决定。
 每次都会重新创建指定的 ABI 目录并完整构建，包括依赖安装目录、PJSIP 补丁和 JNI 产物。
 共享依赖源码和经校验的源码包会保留；不使用构建指纹或增量目标文件缓存。
+每次调用只运行一次 SWIG，生成 Java 绑定和 C++ 包装代码；包装代码仍为每个 ABI 单独编译和链接。
 所有 ABI 成功后才发布暂存的绑定，构建失败会保留原有产物。
 不要同时运行共用工作目录或输出目录的构建。
 

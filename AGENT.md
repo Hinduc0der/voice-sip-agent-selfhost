@@ -123,7 +123,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     hold out-of-tree dependency builds, `prefix/{openssl,opus}` and isolated PJSIP source/build trees.
     Each requested ABI directory is recreated and built from scratch, including dependency installations,
     PJSIP patches and JNI output. Shared sources are retained; there is no build fingerprinting/object reuse.
-    Tarball SHA-256 checks remain. Generated Java/JNI output is published after all ABIs succeed.
+    Tarball SHA-256 checks remain. SWIG generates Java bindings and the C++ wrapper once per invocation;
+    the wrapper is compiled and linked separately for each ABI. Generated Java/JNI output is published after
+    all ABIs succeed.
     Do not run concurrent builds sharing the same work/output directories.
   - Release R8 is enabled. Module consumer rules preserve generated SWIG classes, director callback
     overrides and the Shizuku `PrivilegedService(Context)` reflection entry point. Do not remove these
