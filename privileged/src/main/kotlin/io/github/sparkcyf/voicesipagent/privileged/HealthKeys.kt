@@ -17,6 +17,18 @@ object HealthKeys {
         DIRECT_AUDIO, REDIRECT_AUDIO, LOCAL_SUPPRESSION)
 }
 
+object CallAccess {
+    const val AUTO = 0
+    const val COMPANION = 1
+    const val DIALER = 2
+
+    fun effective(selected: Int, sdk: Int, holdsDialer: Boolean): Int = when (selected) {
+        COMPANION -> if (holdsDialer) DIALER else COMPANION
+        DIALER -> DIALER
+        else -> if (holdsDialer || sdk == 30) DIALER else COMPANION
+    }
+}
+
 object AudioMethod {
     const val AUTO = 0
     const val OFFICIAL = 1

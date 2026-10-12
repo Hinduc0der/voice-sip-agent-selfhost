@@ -1,7 +1,7 @@
 package io.github.sparkcyf.voicesipagent.app
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import android.os.Build
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -46,23 +46,26 @@ import androidx.compose.ui.unit.sp
 import io.github.sparkcyf.voicesipagent.pjsua2.SipTransport
 import io.github.sparkcyf.voicesipagent.pjsua2.SrtpPolicy
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
+import io.github.sparkcyf.voicesipagent.privileged.AudioMethod
+import io.github.sparkcyf.voicesipagent.privileged.CallAccess
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 
-class MainActivity : ComponentActivity() {
+class MainActivity : DialerRoleActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val runtime = GatewayRuntime.get(this)
         GatewayService.start(this)
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-                Scaffold { pad -> Screen(runtime, Modifier.padding(pad)) }
+                val message by roleMessage.collectAsState()
+                Scaffold { pad -> Screen(runtime, Modifier.padding(pad), ::requestDialer, ::switchDialer, message) }
             }
         }
     }
 }
 
 @Composable
-private fun Screen(rt: GatewayRuntime, modifier: Modifier) {
+private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit, roleMessage: String) {
     val h by rt.health.collectAsState()
     val log by AppLog.tail.collectAsState()
     Column(
@@ -76,20 +79,28 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier) {
                 when {
                     h.takeoverOffPending -> "Turning off after the current call"
                     cur.takeover -> "Calls are bridged to the PBX"
-                    else -> "Off: the phone behaves as if this app were not installed"
+                    h.holdsDialer -> "Gateway off; switch dialer to handle calls normally"
+                    else -> "Gateway off; calls stay with your dialer"
                 }
             }
-            Toggle("Silence handset during bridged calls", cur.muteEarpiece, { rt.setMuteEarpiece(it) }) { "Earpiece and microphone stay off while the PBX side is connected" }
+            if (h.settingsPending) Text("Settings will apply after current calls end")
         }
         Section("Health") {
             val p = h.privileged
             Check("Shizuku", h.shizuku == ShizukuConnector.State.CONNECTED, "${h.shizuku} ${h.shizukuDetail}")
-            Check("Ongoing-call access (appop)", p?.get(HealthKeys.MANAGE_ONGOING_CALLS) == true)
-            Check("Telecom companion override", p?.get(HealthKeys.COMPANION_OVERRIDE) == true)
-            Check("Call audio interceptable", p?.get(HealthKeys.INTERCEPTABLE) == true)
+            Check("Call access", h.callAccessReady,
+                if (h.effectiveCallAccess == CallAccess.DIALER) "Default dialer" else "Alongside your dialer")
+            Check("Call audio access", h.audioReady)
             Check("Doze allowlisted", p?.get(HealthKeys.DOZE_ALLOWLISTED) == true)
             Check("SIP registration", h.sip.ready, h.sip.detail)
-            if (h.privilegedDetail.isNotBlank()) Text(h.privilegedDetail, style = MaterialTheme.typography.bodySmall)
+            Text(h.readinessDetail, style = MaterialTheme.typography.bodySmall)
+            if (h.effectiveCallAccess == CallAccess.DIALER && !h.holdsDialer) {
+                Text("Default-dialer mode bridges calls through the PBX. For manual calling, switch back to your usual dialer.")
+                Button(onClick = requestDialer, enabled = h.dialerRoleAvailable) { Text("Select as default dialer") }
+                if (!h.dialerRoleAvailable) Text("Default dialer selection is unavailable on this device.")
+            }
+            if (roleMessage.isNotEmpty()) Text(roleMessage)
+            if (h.holdsDialer) OutlinedButton(onClick = switchDialer) { Text("Switch dialer") }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (h.shizuku == ShizukuConnector.State.PERMISSION_REQUIRED || h.shizuku == ShizukuConnector.State.PERMISSION_DENIED) {
                     Button(onClick = { rt.shizuku.requestPermission() }) { Text("Grant Shizuku") }
@@ -99,20 +110,41 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier) {
             }
         }
         Section("Call") {
+            Text(h.calls.summary)
             Text(h.session ?: "No active session")
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Loopback test (echo inbound calls)", Modifier.weight(1f))
-                Switch(checked = h.loopbackTest, onCheckedChange = { rt.setLoopbackTest(it) })
-            }
         }
         SettingsSection(rt)
-        Section("Log") {
-            Text(
-                log.takeLast(60).reversed().joinToString("\n"),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                lineHeight = 14.sp,
-            )
+        var advanced by remember { mutableStateOf(false) }
+        OutlinedButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Hide advanced settings" else "Advanced settings") }
+        if (advanced) {
+            Section("Platform integration") {
+                Choice("Call access", listOf(CallAccess.AUTO, CallAccess.COMPANION, CallAccess.DIALER), cur.callAccess,
+                    { when (it) { CallAccess.AUTO -> "Automatic"; CallAccess.COMPANION -> "Alongside dialer"; else -> "Default dialer" } }) {
+                    rt.applySettings(cur.copy(callAccess = it))
+                }
+                Choice("Cellular audio", listOf(AudioMethod.AUTO, AudioMethod.LEGACY, AudioMethod.OFFICIAL), cur.audioMethod,
+                    { when (it) { AudioMethod.AUTO -> "Automatic"; AudioMethod.LEGACY -> "Direct telephony"; else -> "Call redirection" } },
+                    enabled = { it != AudioMethod.OFFICIAL || Build.VERSION.SDK_INT >= 33 }) {
+                    rt.applySettings(cur.copy(audioMethod = it))
+                }
+                Toggle("Silence handset during bridged calls", cur.muteEarpiece, { rt.setMuteEarpiece(it) }) {
+                    if (h.privileged?.get(HealthKeys.LOCAL_SUPPRESSION) == true && cur.audioMethod != AudioMethod.LEGACY)
+                        "Automatic when call redirection supports it; applies from next call"
+                    else "Unavailable with the current platform or audio method"
+                }
+                Toggle("Loopback test (echo inbound calls)", h.loopbackTest, { rt.setLoopbackTest(it) }) { "Echoes incoming calls instead of connecting the PBX" }
+                Toggle("pjsip debug log", cur.sipDebugLog, { rt.setSipDebugLog(it) }) { "Info-level logs with masked numbers" }
+            }
+            Section("Diagnostics") {
+                Text("Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT}")
+                Text("requestedCallAccess=${cur.callAccess} effective=${h.effectiveCallAccess} audio=${cur.audioMethod}")
+                Text(h.privileged?.entries?.joinToString("\n") { "${it.key}=${it.value}" } ?: "Waiting for helper")
+                Text(h.privilegedDetail)
+                Text(h.lastSetupLog)
+                Text("Audio access and frame counters do not verify remote delivery. Verify both directions on this device.")
+                Text(log.takeLast(60).reversed().joinToString("\n"), fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp, lineHeight = 14.sp)
+            }
         }
     }
 }
@@ -165,9 +197,6 @@ private fun SettingsSection(rt: GatewayRuntime) {
                 ),
             )
         }) { Text("Save & apply") }
-        Toggle("pjsip debug log", cur.sipDebugLog, { rt.setSipDebugLog(it) }) {
-            "Info-level pjsip lines in the log (numbers masked); applies immediately"
-        }
     }
 }
 

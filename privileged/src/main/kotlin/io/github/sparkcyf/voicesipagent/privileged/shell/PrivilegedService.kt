@@ -1,6 +1,7 @@
 package io.github.sparkcyf.voicesipagent.privileged.shell
 
 import android.content.Context
+import android.annotation.SuppressLint
 import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
@@ -10,6 +11,7 @@ import android.os.Process
 import android.os.SystemClock
 import android.util.Log
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
+import io.github.sparkcyf.voicesipagent.privileged.CallAccess
 import io.github.sparkcyf.voicesipagent.privileged.IPrivilegedService
 import kotlin.system.exitProcess
 
@@ -40,31 +42,40 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     }
 
     override fun destroy() {
+        enforceCaller()
         Log.i(TAG, "destroy")
         closeCallAudio()
         exitProcess(0)
     }
 
-    override fun getUid(): Int = Process.myUid()
+    override fun getUid(): Int { enforceCaller(); return Process.myUid() }
 
     override fun setup(packageName: String, takeover: Boolean): Bundle {
+        return setupCallAccess(packageName, takeover, CallAccess.AUTO)
+    }
+
+    override fun setupCallAccess(packageName: String, takeover: Boolean, callAccess: Int): Bundle {
         enforceCaller(packageName)
         val log = StringBuilder()
         fun step(name: String, vararg cmd: String) {
             val r = ShellEnv.run(*cmd)
             log.append(name).append('=').append(if (r.exit == 0) "ok" else "fail(${r.exit}: ${r.out.trim().take(120)})").append('\n')
         }
-        if (!appOpAllowed(packageName)) step("appops", "appops", "set", packageName, "MANAGE_ONGOING_CALLS", "allow")
+        val companion = Build.VERSION.SDK_INT >= 31 && callAccess != CallAccess.DIALER
+        if (companion && !appOpAllowed(packageName)) step("appops", "appops", "set", packageName, "MANAGE_ONGOING_CALLS", "allow")
         // The override is lost on every reboot and Telecom restart, so it is re-checked each time. Telecom
         // keeps it as a plain list: adding appends a duplicate and removing drops one entry.
-        val entries = companionOverrideCount(packageName)
-        if (takeover && entries == 0) {
+        val entries = if (Build.VERSION.SDK_INT >= 31) companionOverrideCount(packageName) else 0
+        if (companion && takeover && entries == 0) {
             step("companion", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "1")
-        } else if (!takeover) {
+        } else if (!takeover || !companion) {
             repeat(entries) { step("companion-remove", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "0") }
         }
         if (!dozeAllowlisted(packageName)) step("deviceidle", "cmd", "deviceidle", "whitelist", "+$packageName")
-        for (perm in RUNTIME_PERMISSIONS) step("grant:${perm.substringAfterLast('.')}", "pm", "grant", packageName, perm)
+        for (perm in RUNTIME_PERMISSIONS) {
+            if (perm.endsWith("POST_NOTIFICATIONS") && Build.VERSION.SDK_INT < 33) continue
+            step("grant:${perm.substringAfterLast('.')}", "pm", "grant", packageName, perm)
+        }
         Log.i(TAG, "setup:\n$log")
         return health(packageName).apply { putString("setup_log", log.toString()) }
     }
@@ -73,8 +84,8 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         enforceCaller(packageName)
         val b = Bundle()
         b.putInt(HealthKeys.UID, Process.myUid())
-        b.putBoolean(HealthKeys.MANAGE_ONGOING_CALLS, appOpAllowed(packageName))
-        b.putBoolean(HealthKeys.COMPANION_OVERRIDE, companionOverridden(packageName))
+        b.putBoolean(HealthKeys.MANAGE_ONGOING_CALLS, Build.VERSION.SDK_INT >= 31 && appOpAllowed(packageName))
+        b.putBoolean(HealthKeys.COMPANION_OVERRIDE, Build.VERSION.SDK_INT >= 31 && companionOverridden(packageName))
         b.putBoolean(HealthKeys.DOZE_ALLOWLISTED, dozeAllowlisted(packageName))
         val icp = ShellEnv.isPstnCallAudioInterceptable()
         b.putBoolean(HealthKeys.INTERCEPTABLE, icp == true)
@@ -132,6 +143,8 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
      * MODIFY_PHONE_STATE, so its (newer) mode request outranks Telecom's IN_CALL. AudioService drops
      * the request if this process dies, so a crash cannot leave the phone stuck in this mode.
      */
+    // MODE_CALL_REDIRECT is a system API constant, guarded below and absent from public SDK stubs.
+    @SuppressLint("WrongConstant")
     private fun muteLocal(): String = synchronized(muteLock) {
         if (Build.VERSION.SDK_INT < 33) return "unavailable: handset suppression requires API 33"
         if (localMuted) return "already muted"

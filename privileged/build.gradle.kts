@@ -24,4 +24,5 @@ dependencies {
     api(project(":voice-api"))
     api(libs.shizuku.api)
     implementation(libs.shizuku.provider)
+    testImplementation(libs.junit)
 }

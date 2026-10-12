@@ -41,4 +41,7 @@ interface IPrivilegedService {
      * Only valid while the tap is open; closing the tap always restores. Returns a short report.
      */
     String setLocalOutputMuted(boolean muted) = 7;
+
+    /** Selected call access: 0 automatic, 1 companion, 2 default dialer. Never requests a role. */
+    Bundle setupCallAccess(String packageName, boolean takeover, int callAccess) = 8;
 }

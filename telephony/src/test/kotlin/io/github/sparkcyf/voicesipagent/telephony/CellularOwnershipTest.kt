@@ -325,8 +325,37 @@ class CellularOwnershipTest {
         endpoint.onCallRemoved(service, manual)
         CellularEndpoint.detachService(service)
         assertTrue(endpoint.hasCalls)
-        assertTrue(CellularEndpoint.isCompanionBound)
+        assertTrue(CellularEndpoint.isInCallServiceBound)
         verify(manual, never()).disconnect()
         CellularEndpoint.detachService(replacement)
+    }
+
+    @Test fun dialerBindingDuringCallDoesNotReplaceOwnerOrOpenDuplicateAudio() {
+        val dialer = mock(InCallService::class.java)
+        CellularEndpoint.attachManagedService(service, false)
+        try {
+            active(); open()
+            endpoint.setPreferredDialerService(true); drainMain()
+            CellularEndpoint.attachManagedService(dialer, true)
+            val duplicate = makeCall(Call.STATE_ACTIVE)
+            endpoint.onCallAdded(dialer, duplicate)
+            assertEquals(LegState.CONNECTED, leg.state)
+            assertEquals(0, opened!!.closes)
+            assertEquals(1, openCount)
+            verify(call, never()).disconnect()
+            verify(duplicate, never()).disconnect()
+            state(call, Call.STATE_DISCONNECTED)
+            endpoint.onCallRemoved(service, call)
+            endpoint.setPreferredDialerService(true); drainMain()
+            val manual = makeCall(Call.STATE_ACTIVE, Call.Details.DIRECTION_OUTGOING)
+            endpoint.onCallAdded(dialer, manual)
+            assertTrue(endpoint.hasCalls)
+            assertEquals(1, openCount)
+            verify(manual, never()).disconnect()
+        } finally {
+            CellularEndpoint.detachManagedService(dialer)
+            CellularEndpoint.detachManagedService(service)
+            endpoint.setPreferredDialerService(false); drainMain()
+        }
     }
 }

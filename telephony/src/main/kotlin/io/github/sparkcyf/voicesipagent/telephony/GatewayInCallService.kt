@@ -3,11 +3,14 @@ package io.github.sparkcyf.voicesipagent.telephony
 import android.telecom.Call
 import android.telecom.InCallService
 
-/** Telecom-bound companion; forwards everything to the [CellularEndpoint]. */
+/** Shared Telecom callbacks; this component is a companion and its dialer subclass provides UI. */
 open class GatewayInCallService : InCallService() {
+    protected open val isDialerService = false
+    internal val serviceDescription: String
+        get() = if (isDialerService) "default-dialer InCallService" else "companion InCallService"
     override fun onCreate() {
         super.onCreate()
-        CellularEndpoint.attachService(this)
+        CellularEndpoint.attachManagedService(this, isDialerService)
     }
 
     override fun onCallAdded(call: Call) {
@@ -19,6 +22,6 @@ open class GatewayInCallService : InCallService() {
     }
 
     override fun onDestroy() {
-        try { CellularEndpoint.detachService(this) } finally { super.onDestroy() }
+        try { CellularEndpoint.detachManagedService(this) } finally { super.onDestroy() }
     }
 }

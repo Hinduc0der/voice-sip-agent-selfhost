@@ -74,8 +74,11 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
 - **Single clock domain**: `MediaBridge` is driven by the port with `isClockSource` (the cellular tap, i.e. the
   baseband clock); both directions follow that one clock. `RtpSession` has no clock and relies on its jitter
   buffer. A 20 ms ticker is used only when there is no clock source.
-- **Cellular side (`:telephony`)**: the app is not the default dialer but a Telecom **companion InCallService**
-  (CALL_COMPANION_APP + MANAGE_ONGOING_CALLS appop + `cmd telecom add-or-remove-call-companion-app`).
+- **Cellular side (`:telephony`)**: call access is either a Telecom **companion InCallService**
+  (CALL_COMPANION_APP + MANAGE_ONGOING_CALLS appop + `cmd telecom add-or-remove-call-companion-app`)
+  or an explicitly selected default-dialer UI service. Audited stock API 30 requires default-dialer mode.
+  API 31+ readiness uses the enabled non-UI service and MANAGE_ONGOING_CALLS; it does not require
+  a companion override or dialer role. See docs/ANDROID12_SOURCE_AUDIT.md and docs/ANDROID13_SOURCE_AUDIT.md.
   `CellularEndpoint` only handles calls it owns: gateway inbound calls and calls it dialed itself (matched on the
   last 8 digits). Calls the user dials manually and calls arriving while another call exists are left alone;
   emergency numbers are refused fail-closed. Once a call is ACTIVE it is `setMuted(true)` and the audio tap is
@@ -127,7 +130,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     rules without auditing generated JNI lookups and testing a release APK in both app and shell processes.
 - **Runtime (`:app`)**: `GatewayRuntime` singleton; every state-changing operation runs on the single-threaded
   `gateway-runtime` executor. It is started from `GatewayApp.onCreate` (Telecom may start the process just to bind
-  the InCallService). A health check runs every 60 s and re-runs setup if the companion override is lost.
+  the InCallService). A health check runs every 60 s and re-runs setup while idle if takeover is enabled,
+  companion mode is selected, and call access is unavailable. The override alone does not gate readiness;
+  health checks never request the dialer role.
   Settings live in SharedPreferences; the SIP password is sealed with a Keystore AES-GCM key.
 
 ### Takeover switch and handset muting

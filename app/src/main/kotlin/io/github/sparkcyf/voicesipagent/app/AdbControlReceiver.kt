@@ -44,6 +44,7 @@ class AdbControlReceiver : BroadcastReceiver() {
                         inboundTarget = intent.getStringExtra("target") ?: cur.inboundTarget,
                         allowedPrefixes = intent.getStringExtra("prefixes") ?: cur.allowedPrefixes,
                         audioMethod = intent.getIntExtra("audio_method", cur.audioMethod),
+                        callAccess = intent.getIntExtra("call_access", cur.callAccess),
                     ),
                 )
             }

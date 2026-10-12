@@ -68,11 +68,27 @@ Emergency numbers are always refused and are never dialed through the gateway.
    The SHA-256 digest of the release signing certificate is
    `b8fe38aa02f9657c6785fb6faeb20abb20deba410f9c643fcd93269b642850c4`.
 3. Open the app, tap **Grant Shizuku** and allow access. The app then runs its setup automatically (appops,
-   Telecom companion override, Doze allowlist, runtime permissions) and repeats it after upgrades and every 60 s
-   when something is missing.
+   Telecom companion override where applicable, Doze allowlist, runtime permissions) and repeats it after upgrades.
+   A health check runs every 60 s and retries setup while idle if takeover is enabled and companion call access is unavailable.
+   On Android 11, use the visible **Select as default dialer** setup action to grant call access.
+   The app never requests this role automatically. On newer versions, Automatic call access keeps companion
+   integration unless the app already holds the dialer role; Advanced settings can select either mode explicitly.
 4. Fill in **Settings** (PBX host/port, transport, SRTP, user, password, …) and tap **Save & apply**.
-5. **Take over calls** is the master switch. When it is off the app removes itself from the call path entirely
-   and the phone behaves as if the app were not installed.
+5. **Take over calls** is the master switch. Switching it off waits for current calls to end, then stops bridging
+   and companion integration. If this app is the default dialer, its recovery screen stays available;
+   use **Switch dialer** to return normal call handling to your usual dialer.
+
+Advanced settings are collapsed by default. They contain call-access and cellular-audio choices, automatic
+handset suppression when supported, loopback, logging, and diagnostics. Direct telephony audio does not use
+the modern redirection helpers. Direct telephony audio uses voice-call stream mute for handset output,
+including on API 30–32; supported redirection taps retain mode-based suppression. The helper restores its
+changes when the tap closes and preserves an already-muted stream. Device policy/HAL support and both
+audio directions still need testing with suppression enabled. If the helper is forcibly killed, stream
+mute can remain active; raising the call volume can unmute it.
+
+For local listening, turn **Mute local call output** off in **Advanced settings** before the call.
+Downlink output follows the phone's current call audio route (earpiece, speaker, or headset) and volume.
+The handset microphone stays muted while bridging, so local listening does not enable local speech.
 
 ## Configuration
 

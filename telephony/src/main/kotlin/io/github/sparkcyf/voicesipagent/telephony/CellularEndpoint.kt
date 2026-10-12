@@ -237,6 +237,14 @@ class CellularEndpoint(
 
     internal fun owns(leg: CellularLeg) = leg.call?.let { legs[it] === leg } == true
 
+    /** App-controlled service changes wait for all calls; role loss still invalidates readiness. */
+    fun setPreferredDialerService(dialer: Boolean) {
+        main.post {
+            preferDialerService = dialer
+            selectManagedService()
+        }
+    }
+
     internal fun canTap(leg: CellularLeg): Boolean = !closed && !leg.stopping && status.ready && service != null &&
         leg.call?.let { legs[it] === leg && it.state == Call.STATE_ACTIVE && isCellular(it) } == true &&
         observed.keys.count { it.state != Call.STATE_DISCONNECTED } == 1
@@ -303,8 +311,35 @@ class CellularEndpoint(
 
         @Volatile internal var current: CellularEndpoint? = null
         @Volatile private var service: InCallService? = null
+        private val managedServices = LinkedHashMap<InCallService, Boolean>()
+        private var preferDialerService = false
 
-        val isCompanionBound: Boolean get() = service != null
+        val isInCallServiceBound: Boolean get() = service != null
+        val boundServiceDescription: String? get() = service?.let(::serviceDescription)
+
+        private fun serviceDescription(s: InCallService): String =
+            (s as? GatewayInCallService)?.serviceDescription ?: "InCallService"
+
+        internal fun attachManagedService(s: InCallService, dialer: Boolean) {
+            managedServices[s] = dialer
+            selectManagedService()
+        }
+
+        internal fun detachManagedService(s: InCallService) {
+            managedServices.remove(s)
+            detachService(s)
+            selectManagedService()
+        }
+
+        private fun selectManagedService() {
+            if (current?.hasCalls == true && service != null) return
+            val candidate = managedServices.entries.lastOrNull { it.value == preferDialerService }?.key ?: return
+            if (service === candidate) return
+            attachService(candidate)
+            // A standby service may already have reported calls while the old service was retained.
+            // Reconcile them without claiming existing active calls as new gateway arrivals.
+            candidate.calls.toList().forEach { current?.onCallAdded(candidate, it) }
+        }
 
         /**
          * Enables or disables our InCallService component. Disabled, Telecom never binds us and the
@@ -322,14 +357,14 @@ class CellularEndpoint(
             if (service === s) return
             if (service != null) current?.clearCalls("InCallService replaced")
             service = s
-            current?.log("companion InCallService bound")
+            current?.log("${serviceDescription(s)} bound")
         }
 
         fun detachService(s: InCallService) {
             if (service !== s) return
             service = null
             current?.clearCalls("InCallService disconnected")
-            current?.log("companion InCallService unbound")
+            current?.log("${serviceDescription(s)} unbound")
         }
 
         private fun stateLabel(state: Int) = when (state) {

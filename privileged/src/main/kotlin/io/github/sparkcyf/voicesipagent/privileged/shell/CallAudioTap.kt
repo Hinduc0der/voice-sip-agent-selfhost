@@ -1,6 +1,7 @@
 package io.github.sparkcyf.voicesipagent.privileged.shell
 
 import android.content.Context
+import android.annotation.SuppressLint
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFormat
@@ -128,6 +129,9 @@ internal class CallAudioTap(
         }
     }
 
+    // AudioCapabilities checks the helper UID's grants before either backend opens. Lint only
+    // sees the APK permissions, which are deliberately not used for privileged audio.
+    @SuppressLint("MissingPermission")
     private fun openRedirected() {
         check(ShellEnv.isPstnCallAudioInterceptable() != false) { "PSTN audio interception unavailable" }
         // Helpers are usable only when their process-default attribution is valid. If Shizuku's
@@ -183,6 +187,7 @@ internal class CallAudioTap(
     }
 
     /** AirSIM-style fallback for devices without the official interception API. */
+    @SuppressLint("MissingPermission")
     private fun openLegacy() {
         val minRec = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(minRec > 0) { "record buffer size $minRec at $rate Hz" }
