@@ -27,6 +27,10 @@ Separate three questions in support reporting:
 | [Android 6–9](ANDROID6_9_SOURCE_AUDIT.md) | Shell lacks recording/output-capture grants on the audited API 23, 25, 27, and 28 tags. Native audio and Telecom were inspected for Android 6; Android 7–9 coverage is framework-only. The routing APIs already exist. Android 9 adds hidden-API compatibility checks. |
 | [Android 10](ANDROID10_SOURCE_AUDIT.md) | Framework and native audio confirm the downlink permission blocker. Incall-music uplink checks phone-state permission and can retry local output on denial. Telecom companion classification/binding exist, but test-list registration requires `userdebug`; the current `MANAGE_ONGOING_CALLS` app-op is absent. RoleManager exists and public playback capture is insufficient. Generic role qualification and physical-device behavior remain unverified. |
 | [Android 11](ANDROID11_SOURCE_AUDIT.md) | Framework, native audio, and Telecom establish the first audited stock unrooted candidate: shell has recording, output-capture, and phone-state grants; ordinary voice-communication playback can select telephony TX. Companion classification is incomplete on this tag, so stock call control requires explicit default-dialer selection with a UI-declared service. Helper/device verification remains outstanding. |
+| [Android 12L](ANDROID12_SOURCE_AUDIT.md) | Audited API 32 has a record context setter and a context-free track, so process attribution still matters. Direct telephony routing remains available under the required privileges; modern redirection is absent. Telecom admits a non-UI service with permitted `MANAGE_ONGOING_CALLS` alongside the user's dialer. |
+| [Android 13](ANDROID13_SOURCE_AUDIT.md) | API 33 retains non-UI AppOp admission without a companion override. Default attribution now prefers the Application source; tracks remain context-free. Redirection helpers and shell interception permission are present, while direct routing remains available. |
+
+The [Android 12 admission patches and test evidence](ANDROID12_SOURCE_AUDIT.md#release-history-and-test-evidence) establish the origin of this non-UI path. The supplied release information places both its introduction (`4cc5a541`) and the attribution-aware permission-check follow-up (`e3f82cc7`) in the initial public Android 12/API 31 release. API 31+ readiness requires the enabled service, allowed `MANAGE_ONGOING_CALLS`, and calling permissions, without a companion override or default-dialer role. Full local tag audits cover API 32 and 33; these patches are not a full API 31 audio audit. A focused [current Android 17 Telecom check](ANDROID13_SOURCE_AUDIT.md#current-framework-follow-up-android-17) confirms independent NON_UI admission and removes the former app-imposed API 34+ override requirement. Android 14–16 tags were not separately audited.
 
 The [audits index](README.md) records exact tags and coverage. These results do not establish every initial or vendor release, and no historical candidate has been tested for physical two-way audio. Check actual grants/capabilities at runtime. Matching [Android 11 PermissionController qualification](ANDROID11_SOURCE_AUDIT.md#permissioncontroller-dialer-qualification) is audited: one enabled gateway/recovery activity with two `ACTION_DIAL` filters, both carrying `CATEGORY_DEFAULT`, can qualify without a normal dial pad. One filter has no data scheme; the other handles `tel`. Role qualification and actual Telecom service binding remain separate checks. Role permission grants are limited to requested permissions in the configured ordinary permission sets.
 
@@ -38,13 +42,17 @@ Other recording options include manufacturer-specific support, a privileged syst
 
 ## Current implementation
 
-- All four Android modules currently declare `minSdk 34`.
-- Telecom integration is a companion `InCallService`; there is no default-dialer activity or in-call UI.
-- Readiness and periodic setup are tied to the companion override and `MANAGE_ONGOING_CALLS` app-op.
-- `AudioMethod` already has `AUTO`, `OFFICIAL`, and `LEGACY`, but the app UI does not expose this choice.
-- The "official" path does not call `AudioManager.getCallUplinkInjectionAudioTrack()`. It reconstructs the PSTN helper's record and track with an explicit shell context. Its redirection mode is `CALL_REDIRECT_PSTN`.
-- The legacy path uses `VOICE_DOWNLINK` and a track explicitly preferring `TYPE_TELEPHONY`, but still calls `Builder.setContext()`, which is absent in Android 6. `AudioRecord.Builder`, `AudioTrack.Builder`, and `AudioTrack.Builder.setTransferMode()` already exist in API 23.
-- Handset silencing changes the audio mode to `MODE_CALL_REDIRECT`, available from API 33. The existing mute implementation is not an API 23 fallback.
+The implementation below is already present. Later implementation steps retain the design and review checklist;
+helper/device validation and the explicitly deferred features remain outstanding.
+
+- All four Android modules currently declare `minSdk 30`; Android 11 support remains provisional pending helper/device verification.
+- Telecom integration supports a companion non-UI `InCallService` or an explicitly selected default-dialer UI service with a gateway/recovery activity. Manual-call controls remain deferred; the recovery screen offers switching to the usual dialer.
+- API 30 requires default-dialer mode. API 31+ companion readiness requires an enabled non-UI service, allowed `MANAGE_ONGOING_CALLS`, and calling permissions. The companion override remains diagnostic and a setup operation; its absence does not block readiness. Periodic setup retries unavailable companion call access while idle, without automatically requesting the dialer role.
+- Collapsed Advanced settings expose call access, `AudioMethod` (`AUTO`, `OFFICIAL`, `LEGACY`), local output mute, loopback, debug logging, and diagnostics. The call log remains visible outside Advanced.
+- The redirection (`OFFICIAL`) path uses `AudioManager.getCallDownlinkExtractionAudioRecord()` and `getCallUplinkInjectionAudioTrack()` when process-default attribution matches the helper. If helpers are unusable, it constructs equivalent PSTN record/track objects with attributed construction. Explicit redirection never falls back to direct routing; Automatic may fall back after cleanup, preserving the requested PCM format and failure details.
+- The direct (`LEGACY`) path skips redirection helpers and flags, using `VOICE_DOWNLINK` and a track explicitly preferring `TYPE_TELEPHONY`. Construction detects each builder's `setContext(Context)` independently and prepares default attribution when it is absent; the documented introduction levels are API 31 for record and API 34 for track. `AudioRecord.Builder`, `AudioTrack.Builder`, and `AudioTrack.Builder.setTransferMode()` already exist in API 23.
+- Local output suppression uses `MODE_CALL_REDIRECT` for supported redirection taps from API 33, and voice-call stream mute for direct taps, including API 30–32. Cleanup restores owned changes and preserves an initially-muted stream. Effectiveness and interactions with capture/injection remain subject to physical verification.
+- The default-dialer role provides call access, not privileged call-audio capture/injection permissions; audio remains in the Shizuku helper.
 - SIP exchanges PCM directly through the media ports. It does not currently inject into another Android VoIP application's capture stream.
 - The current media implementation supports explicit 8 kHz and 16 kHz formats. Preserve the rule that both sides of a bridge have the same format; do not silently retry at another rate.
 
@@ -93,13 +101,13 @@ A separate process in one package shares its UID and permissions; an independent
 
 ## Settings and defaults
 
-Add an Advanced section that is collapsed by default. Keep ordinary SIP configuration and the master gateway switch visible. Surface a required setup action in the main health/status area even when Advanced is closed.
+The implemented Advanced section is collapsed by default. Keep ordinary SIP configuration and the master gateway switch visible. Surface a required setup action in the main health/status area even when Advanced is closed.
 
 | Setting | Choices | Default and behavior |
 | --- | --- | --- |
-| Call access | Automatic, alongside existing dialer, use as default dialer | Automatic preserves companion integration where available. On the unmodified audited API 30 baseline, companion integration is unavailable: show the required default-dialer setup action and wait for user selection; refusing it leaves gateway call access unavailable. Default-dialer mode remains selectable on newer Android versions. Explain that this mode supports gateway operation and shows a switch-dialer recovery action when SIP is disconnected. |
+| Call access | Automatic, alongside existing dialer, use as default dialer | Automatic uses default-dialer integration when the app holds the role or on API 30, and companion integration otherwise. On the unmodified audited API 30 baseline, companion integration is unavailable: show the required default-dialer setup action and wait for user selection; refusing it leaves gateway call access unavailable. Default-dialer mode remains selectable on newer Android versions. Explain that this mode supports gateway operation and shows a switch-dialer recovery action when SIP is disconnected. |
 | Cellular audio | Automatic, direct telephony device, call redirection | Automatic prefers modern PSTN redirection when usable, using framework helpers first and equivalent manual construction when a construction/attribution workaround is required. It may fall back to direct telephony routing after complete cleanup, preserving failure details and the PCM format. API 30–32 use the legacy path when required audio access is available. Explicit direct telephony skips interception helpers/flags; explicit redirection never silently switches to direct routing. Otherwise report audio unavailable. |
-| Silence handset during bridged calls | Automatic when supported, off | Use the existing implementation only where supported. Show unavailable/ineffective status instead of claiming the handset was silenced. Keep existing users' explicit preference. |
+| Mute local call output | On, off | On attempts mode-based suppression for supported redirection taps and voice-call stream mute for direct taps. Off keeps normal call output for local listening; the handset microphone stays muted. Changes apply from the next call. Show unavailable/ineffective status instead of claiming the handset was silenced. Keep existing users' explicit preference. |
 | Diagnostics | Show capabilities and last audio-open result | Present Android/API version, requested and effective modes, privileged permission checks, advertised endpoints, and setup failures. Avoid displaying object creation or frame counters as proof of remote audio delivery. |
 
 Use product labels in the UI; put API names and error details in diagnostics. Keep requested settings separate from effective capabilities so an unavailable feature does not erase the user's preference.
@@ -108,11 +116,11 @@ VoIP redirection is a separate extension point, disabled by default if implement
 
 ## Workload by API level
 
-| API group | Current port workload |
+| API group | Implementation and remaining checks |
 | --- | --- |
-| 30 | Best-audited legacy reference: context-free construction, direct telephony audio, and minimal default-dialer integration. Prove this path first on a real device. |
-| 31-32 | Attribution/class-loading changes and release-specific construction/call-access verification. Keep one legacy audio backend with version-specific construction; these releases do not have the same detailed audit coverage as API 30. |
-| 33+ | Closest to current code: compatibility guards, optional modern redirection/handset suppression, and settings/lifecycle changes. API 33 still needs branches for behavior currently assumed to require API 34. |
+| 30 | Context-free construction, direct telephony audio, and gateway/recovery default-dialer integration are implemented. Verify helper startup, native loading, callbacks, mute/restoration, and two-way audio on a real device. |
+| 31-32 | Independent builder detection and attribution adaptation are implemented; call access uses non-UI AppOp admission. Full source coverage is API 32, with API 31 admission-patch evidence only. Verify runtime construction, service binding, and physical audio. |
+| 33+ | Direct and modern redirection choices, optional local suppression, and settings/lifecycle guards are implemented. Verify release-specific attribution, routing, and cleanup on devices; full local source coverage is API 33 with a focused current API 37 Telecom follow-up. |
 
 Keep diagnostics limited to the selected call-access/audio path, observed failures, and format. Preserve cleanup, dependency/native-library compatibility, settings migration, and physical two-way audio checks at the requested 8/16 kHz formats. Establish the API 30 path before expanding the device/version matrix.
 
@@ -200,7 +208,7 @@ Established Android 11 findings:
 - The builders lack `setContext()` and `AttributionSource` is absent. Start with context-free construction; Android 11 AppOps normalizes shell UID operations to `com.android.shell`. Verify actual package handling and hidden-API access in the helper.
 - Telecom's companion override command changes the list, but its InCallService classifier never returns companion type. Mark ordinary companion mode unavailable on this tag. Default-dialer binding requires `BIND_INCALL_SERVICE` protection and `IN_CALL_SERVICE_UI=true` metadata.
 - Output HAL patch failures are not consistently propagated. A successful preference setter, reported route, playback state, or frame counters cannot establish delivery. Record start failures can leave Java recording state stopped without an exception.
-- The current redirection backend and `MODE_CALL_REDIRECT` handset suppression are absent. Leave these choices unavailable on API 30.
+- The redirection backend and `MODE_CALL_REDIRECT` handset suppression are absent. Leave redirection unavailable on API 30; direct taps can attempt the voice-call stream-mute fallback described below.
 
 Next checks:
 
@@ -236,7 +244,17 @@ Use the existing `CallEndpoint` and `CallAudioOpener` boundaries as described in
 
 Adapt the existing legacy backend with release-specific construction and the recipe verified in phase 1. Keep record and track in the helper with the existing transport and clock.
 
-For API 30, implement the verified native-policy recipe: `VOICE_DOWNLINK` recording and ordinary `USAGE_VOICE_COMMUNICATION` playback preferring telephony TX during an active cellular call. Policy supplies the incall-music flag automatically; do not set a hidden output flag or request a new audio mode. Neither builder has `setContext()`, and the `AttributionSource` class is absent. Android 11 AppOps resolves shell operations to `com.android.shell`; check actual record and track construction in the helper before adding an attribution adapter. Do not select the current redirection backend: its helper APIs and redirection flags are absent. `USAGE_CALL_ASSISTANT` alone is not an equivalent backend, and its validation requires routing permission that this shell lacks.
+Android documents [`AudioRecord.Builder.setContext(Context)`](https://developer.android.com/reference/android/media/AudioRecord.Builder#setContext(android.content.Context)) from API 31 and [`AudioTrack.Builder.setContext(Context)`](https://developer.android.com/reference/android/media/AudioTrack.Builder#setContext(android.content.Context)) from API 34. Their construction boundaries differ:
+
+| Android API | Record builder context setter | Track builder context setter | Helper construction |
+| --- | --- | --- | --- |
+| 30 | Absent | Absent | Context-free builders with verified operation-package attribution. |
+| 31–33 | Available | Absent | Explicit record context; verified process attribution for the context-free track. |
+| 34+ | Available | Available | Explicit contexts for both builders where usable. |
+
+These are documented introduction levels. Keep runtime detection separate for each builder to handle vendor differences, and report invocation failures instead of treating them as an absent method. The supplied Android 11 source confirms the API 30 row; the supplied [Android 12L source](ANDROID12_SOURCE_AUDIT.md#construction-and-attribution-differences) and inspected API 32 device confirm the record/track difference on that release. This is not a full API 31–34 source audit.
+
+For API 30, implement the verified native-policy recipe: `VOICE_DOWNLINK` recording and ordinary `USAGE_VOICE_COMMUNICATION` playback preferring telephony TX during an active cellular call. Policy supplies the incall-music flag automatically; do not set a hidden output flag or request a new audio mode. Neither builder has `setContext()`, and the `AttributionSource` class is absent. Android 11 AppOps resolves shell operations to `com.android.shell`; prepare and verify the helper's operation package before context-free construction, using the adapter described below when bootstrap attribution is mismatched. Do not select the current redirection backend: its helper APIs and redirection flags are absent. `USAGE_CALL_ASSISTANT` alone is not an equivalent backend, and its validation requires routing permission that this shell lacks.
 
 If a candidate release still rejects caller attribution, inspect its available constructors and hidden initialization entry points before deciding it is unsupported. Use a narrow, version-specific reflection or JNI adapter only when needed and validate it in the actual helper process. Do not attempt to reflectively call an absent `setContext()` method or treat supplied package/UID values as a way to acquire privileges. Permission preflight and device audio verification remain required for any alternative construction path.
 
@@ -265,6 +283,16 @@ If helper construction requires an attribution or release-compatibility workarou
 Treat helper-managed release on an incompatible mode change as audio loss: close the paired objects and socket, notify the existing call/audio owner, and restore owned mute/mode state. Manual redirection construction must release its objects on the same incompatible mode transitions. Central cleanup must remain idempotent, including partial helper construction, fallback, call end, helper death, and late open completion.
 
 Reflection can implement the shell-context plumbing: on a release providing `Builder.setContext(Context)`, a reflective invocation passing the shell context is equivalent to the direct builder call for attribution. Treat this as a valid attribution workaround, distinct from merely reflecting into the unchanged helper. On releases without that method, inspect equivalent existing initialization paths instead. Correct attribution enables use of existing caller permissions and does not replace the native permission checks.
+
+API 32 device-framework follow-up (2026-10-12): the observed call reached active cellular and SIP legs, but audio setup failed because the implementation assumed both builders provided `setContext(Context)` from API 31. Inspection of the connected device's `/system/framework/framework.jar` confirmed that `AudioRecord.Builder` provides the setter and `AudioTrack.Builder` does not, consistent with the documented API 31/34 introduction levels above. Its track constructor supplies `PlayerBase.getCurrentOpPackageName()` to native setup, which reads `ActivityThread.currentOpPackageName()`. Its `AttributionSource.myAttributionSource()` likewise derives attribution from the process UID and current operation package. These are findings for that inspected framework, not a full API 31–33 source audit.
+
+The fix detects each builder's setter independently. Where either is absent, prepare and verify helper-local default attribution before construction. On API 31+, wrap the existing Application base context and override only `getOpPackageName()` and `getAttributionSource()`, preserving the Application object, its real package metadata, and the Linux UID. This covers the inspected operation-package path and frameworks that read the Application attribution source. Keep explicit builder contexts where supported. Report adapter or setter-invocation failures instead of constructing with unverified attribution; retain the separate API 30 operation-package adapter.
+
+Validation after this fix: all 10 privileged unit tests passed, including four builder-context regression tests; debug and release APK builds succeeded; app debug lint reported zero errors. Physical two-way audio with the rebuilt APK remains unverified. Missing modern redirection APIs on API 32 are expected and do not prevent trying the direct telephony backend when its prerequisites are available. Neither permission preflight nor successful construction proves modem delivery.
+
+Handset-output follow-up (2026-10-12): direct tap construction and cellular-to-SIP voice were observed on the API 32 device, but handset output remained audible. Direct taps now attempt `adjustStreamVolume(STREAM_VOICE_CALL, ADJUST_MUTE, 0)` as the helper, retaining IN_CALL. Audited Android 11 AudioService admits voice-call stream mute with `MODIFY_PHONE_STATE`; a nonzero minimum volume does not prohibit this mute operation. Preserve the original mute state without changing the volume index, verify the observed mute flag after a bounded wait, and undo only owned changes with ADJUST_UNMUTE. Supported redirection taps retain MODE_CALL_REDIRECT. Telecom microphone mute remains separately owned by the cellular controller.
+
+Mute failures are best effort and reported in diagnostics; they do not fail an otherwise working audio tap. Tap close and helper teardown attempt restoration, and failed restoration remains owned for retry. Register tap ownership before starting its threads, serialize mute with open/close, and clear Binder caller identity on restoration as well as acquisition. Global stream mute has no process-death lease: a forcibly killed helper can leave it set. Raising call volume can unmute it. Unlike mode-based suppression, this fallback does not tear down handset audio patches; the mute flag does not prove physical silence or unchanged capture/injection. Verify local output, both remote audio directions, normal restoration, and forced-death recovery on each device.
 
 Keep the capture/injection implementation independent of call-access mode. A default-dialer app still invokes the Shizuku audio service.
 
@@ -339,7 +367,7 @@ Audit the selected AndroidX AAR manifests and Java library API calls. Pin compat
 
 After the audio feasibility decision, set the chosen minimum consistently in `:app`, `:telephony`, `:privileged`, and `:sip-pjsua2`.
 
-Rebuild PJSIP, OpenSSL, Opus, and the SWIG/JNI wrapper for that minimum; the native build currently defaults to API 34. Check native imports and loading on the oldest supported release. Preserve the current null sound device, format agreement, codec setup, release shrinking rules, and JNI/reflection entry points.
+Rebuild PJSIP, OpenSSL, Opus, and the SWIG/JNI wrapper for that minimum; the native build now defaults to API 30. Check native imports and loading on the oldest supported release. Preserve the current null sound device, format agreement, codec setup, release shrinking rules, and JNI/reflection entry points.
 
 Retain arm64-only packaging initially if the test phone supports it. Add an armeabi-v7a build only if intended older devices require 32-bit support; keep ABI scope explicit.
 
@@ -365,10 +393,10 @@ Use emulators for compatibility, role qualification, and gateway/recovery screen
 
 | Android versions | Main checks |
 | --- | --- |
-| API 30 provisional stock unrooted minimum | Native capture/injection and Telecom audits are complete. Verify actual grants, context-free construction/attribution, dialer-role qualification and UI-service callbacks, native loading, and physical two-way audio. Companion mode is unavailable on the audited tag; current redirection and handset-suppression implementations remain unavailable. |
-| API 31-32 | RoleManager selection, attribution boundary at API 31, and release-specific companion capabilities. |
-| API 33 | Modern PSTN redirection and optional handset suppression. |
-| API 34+ | Companion and dialer choices, direct and modern audio choices, current foreground-service rules. |
+| API 30 provisional stock unrooted minimum | Native capture/injection and Telecom audits are complete. Verify actual grants, context-free construction/attribution, dialer-role qualification and UI-service callbacks, native loading, voice-call stream mute/restoration, and physical two-way audio. Companion mode and modern redirection are unavailable on the audited tag. |
+| API 31-32 | RoleManager selection, record context setter from API 31, context-free track attribution, and release-specific companion capabilities. |
+| API 33 | Modern PSTN redirection and optional handset suppression; the track still requires default process attribution. |
+| API 34+ | Track context setter from API 34, companion and dialer choices, direct and modern audio choices, current foreground-service rules. |
 
 On physical devices verify inbound/outbound gateway calls, remote receipt of injected audio, downlink audio, mute behavior, SIP-disconnected refusal, out-of-scope dial-intent recovery, takeover off, switching back to another dialer, dialer-role loss, Shizuku death, call termination, network reconnection, and return to normal handset routing. Preserve the existing call-clock behavior.
 
@@ -389,4 +417,4 @@ The [direct privileged implementation](#optional-direct-privileged-operation) is
 
 ## Remaining evidence
 
-Prioritize production API 30 helper/call-control changes and verify physical two-way audio through the resulting app. Framework, native audio, Telecom, and matching PermissionController role definitions/qualification code are audited for the supplied Android 11 tag; another framework clone is not needed for that source gate. The supplied `UserService.java` establishes gateway-package application attribution for its bootstrap path, so implementation should include the helper-local operation-package adapter above. An initial Android 11 framework baseline can separately narrow the stock permission-grant release boundary if needed. Android 7–9 native audio/Telecom remain unaudited; filling that gap is deferred with the older port. Exact audited tags and repository coverage are listed in [README.md](README.md).
+Prioritize helper execution, call-control callbacks, native loading, and physical two-way audio through the implemented API 30 app. Framework, native audio, Telecom, and matching PermissionController role definitions/qualification code are audited for the supplied Android 11 tag; another framework clone is not needed for that source gate. The supplied `UserService.java` establishes gateway-package application attribution for its bootstrap path; the implementation includes the helper-local operation-package adapter above. An initial Android 11 framework baseline can separately narrow the stock permission-grant release boundary if needed. Android 7–9 native audio/Telecom remain unaudited; filling that gap is deferred with the older port. Exact audited tags and repository coverage are listed in [README.md](README.md).
