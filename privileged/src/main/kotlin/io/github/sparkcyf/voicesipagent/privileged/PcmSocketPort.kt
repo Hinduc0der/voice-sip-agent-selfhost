@@ -8,6 +8,7 @@ import io.github.sparkcyf.voicesipagent.voice.MediaPort
 import io.github.sparkcyf.voicesipagent.voice.PcmFormat
 import java.io.Closeable
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * App-side [MediaPort] over the SEQPACKET socket returned by openCallAudio(). It is a clock source:
@@ -22,7 +23,7 @@ class PcmSocketPort(
     private val fd = pfd.fileDescriptor
     private val queue = ArrayBlockingQueue<ShortArray>(8)
     @Volatile private var listener: FrameClockListener? = null
-    @Volatile private var closed = false
+    private val closed = AtomicBoolean()
     private val writeBuf = ByteArray(format.frameBytes)
 
     @Volatile var framesIn = 0L; private set
@@ -44,8 +45,9 @@ class PcmSocketPort(
     override fun readFrame(): ShortArray = queue.poll() ?: format.silence()
 
     override fun writeFrame(frame: ShortArray) {
-        if (closed) return
+        if (closed.get()) return
         synchronized(writeBuf) {
+            if (closed.get()) return
             format.encodeLe(frame, writeBuf)
             try {
                 check(Os.write(fd, writeBuf, 0, writeBuf.size) == writeBuf.size) { "short PCM packet write" }
@@ -61,7 +63,7 @@ class PcmSocketPort(
         val buf = ByteArray(format.frameBytes + 1)
         var reason = "eof"
         try {
-            while (!closed) {
+            while (!closed.get()) {
                 val n = Os.read(fd, buf, 0, buf.size)
                 if (n <= 0) break
                 check(n == format.frameBytes) { "PCM packet size $n, expected ${format.frameBytes}" }
@@ -77,15 +79,18 @@ class PcmSocketPort(
     }
 
     private fun closeWith(reason: String) {
-        if (closed) return
-        close()
-        onClosed(reason)
+        if (release()) onClosed(reason)
     }
 
     override fun close() {
-        if (closed) return
-        closed = true
+        release()
+    }
+
+    private fun release(): Boolean {
+        if (!closed.compareAndSet(false, true)) return false
+        listener = null
         try { Os.shutdown(fd, OsConstants.SHUT_RDWR) } catch (_: Exception) {}
         try { pfd.close() } catch (_: Exception) {}
+        return true
     }
 }

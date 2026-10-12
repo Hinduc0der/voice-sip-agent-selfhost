@@ -28,7 +28,8 @@ class CellularLeg internal constructor(
     @Volatile internal var call: Call? = null
         private set
     @Volatile private var hangupRequested: HangupCause? = null
-    private var audio: CallAudioHandle? = null
+    private val audio = AudioLease { endpoint.log("cell $id audio close failed: ${it.javaClass.simpleName}") }
+    internal val stopping: Boolean get() = hangupRequested != null || state == LegState.ENDED
     private var audioAttempt = 0
     private val dtmfQueue = ArrayDeque<Pair<Char, Int>>()
     private var dtmfPlaying = false
@@ -40,12 +41,12 @@ class CellularLeg internal constructor(
     internal fun bind(c: Call) {
         call = c
         c.registerCallback(callback, main)
-        hangupRequested?.let { disconnect(c) }
+        if (stopping) { disconnectSafely(c); return }
         onTelecomState(c.state)
     }
 
     internal fun onRemoved() {
-        call?.unregisterCallback(callback)
+        call?.let { runCatching { it.unregisterCallback(callback) } }
         if (state != LegState.ENDED) finish(causeFromTelecom())
     }
 
@@ -53,66 +54,111 @@ class CellularLeg internal constructor(
     internal fun failPlacement(cause: HangupCause) = main.post { finish(cause) }
 
     private fun onTelecomState(s: Int) {
+        if (s == Call.STATE_DISCONNECTED) { finish(causeFromTelecom()); return }
+        if (stopping) return
         when (s) {
             Call.STATE_NEW, Call.STATE_CONNECTING, Call.STATE_DIALING, Call.STATE_RINGING,
             Call.STATE_SELECT_PHONE_ACCOUNT, Call.STATE_PULLING_CALL -> transition(LegState.PROCEEDING)
             Call.STATE_ACTIVE -> {
                 if (transition(LegState.CONNECTED)) {
                     endpoint.log("cell $id active")
-                    endpoint.setMuted(true)
-                    openAudio()
+                    if (!endpoint.canTap(this)) return abortAudio("call no longer eligible")
+                    try {
+                        check(endpoint.acquireMute(this)) { "microphone mute state unavailable" }
+                    } catch (e: Exception) {
+                        return abortAudio("microphone mute failed: ${e.javaClass.simpleName}")
+                    }
+                    openAudio(audio.begin())
                 }
             }
-            Call.STATE_DISCONNECTED -> finish(causeFromTelecom())
+            Call.STATE_HOLDING -> if (state == LegState.CONNECTED) abortAudio("gateway call put on hold")
+            Call.STATE_DISCONNECTING -> {
+                hangupRequested = HangupCause.NORMAL
+                stopMedia()
+            }
         }
     }
 
-    private fun openAudio() {
+    private fun openAudio(ticket: AudioLease.Ticket) {
+        if (!audio.isCurrent(ticket) || !endpoint.canTap(this)) return
         val opener = endpoint.audioOpener
-        audioExecutor.execute {
+        endpoint.audioExecutor.execute {
+            if (!audio.isCurrent(ticket)) return@execute
             try {
-                val h = opener.open { reason -> main.post { onAudioLost(reason) } }
+                val h = opener.open { reason -> main.post { onAudioLost(ticket, reason) } }
                 main.post {
-                    if (state == LegState.CONNECTED) {
-                        audio = h
-                        endpoint.log("cell $id audio up")
-                        publishMedia(h.port)
+                    if (state == LegState.CONNECTED && endpoint.canTap(this)) {
+                        if (audio.install(ticket, h)) {
+                            endpoint.log("cell $id audio up")
+                            publishMedia(h.port)
+                        }
                     } else {
-                        h.close()
+                        runCatching { h.close() }.onFailure { endpoint.log("cell $id stale audio close failed") }
                     }
                 }
             } catch (e: Exception) {
                 main.post {
                     // MODE_IN_CALL can lag the ACTIVE callback slightly; retry briefly.
+                    if (!audio.isCurrent(ticket) || !endpoint.canTap(this)) return@post
                     if (state == LegState.CONNECTED && ++audioAttempt < 5) {
                         endpoint.log("cell $id audio open failed (${e.message}); retry $audioAttempt")
-                        main.postDelayed(::openAudio, 300L * audioAttempt)
+                        main.postDelayed({
+                            if (audio.isCurrent(ticket) && endpoint.canTap(this)) openAudio(audio.begin())
+                        }, 300L * audioAttempt)
                     } else if (state == LegState.CONNECTED) {
                         endpoint.log("cell $id audio unavailable: ${e.message}")
+                        abortAudio("audio setup failed")
                     }
                 }
             }
         }
     }
 
-    private fun onAudioLost(reason: String) {
-        if (state != LegState.CONNECTED) return
+    private fun onAudioLost(ticket: AudioLease.Ticket, reason: String) {
+        if (state != LegState.CONNECTED || !audio.isCurrent(ticket)) return
         endpoint.log("cell $id audio lost: $reason")
-        audio?.close()
-        audio = null
-        publishMedia(null)
+        abortAudio("audio lost")
+    }
+
+    internal fun abortAudio(reason: String) {
+        if (stopping) return
+        endpoint.log("cell $id stopping: $reason")
+        hangupRequested = HangupCause.NETWORK_ERROR
+        stopMedia()
+        call?.let(::disconnectSafely)
+        finish(HangupCause.NETWORK_ERROR)
+    }
+
+    internal fun onServiceLost(reason: String) {
+        if (state == LegState.ENDED) return
+        endpoint.log("cell $id stopping: $reason")
+        val cause = hangupRequested ?: HangupCause.NETWORK_ERROR
+        hangupRequested = cause
+        stopMedia()
+        call?.let(::disconnectSafely)
+        finish(cause)
+    }
+
+    private fun stopMedia() {
+        audio.invalidate()
+        runCatching { publishMedia(null) }.onFailure { endpoint.log("cell $id media listener failed") }
+        runCatching { endpoint.releaseMute(this) }.onFailure { endpoint.log("cell $id mute restore failed") }
+        dtmfQueue.clear()
+        dtmfPlaying = false
+        call?.let { runCatching { it.stopDtmfTone() } }
     }
 
     private fun finish(cause: HangupCause) {
-        audio?.close()
-        audio = null
-        if (transition(LegState.ENDED, cause)) {
-            endpoint.log("cell $id ended: $cause")
-            endpoint.onLegEnded(this)
-        }
+        if (state == LegState.ENDED) return
+        stopMedia()
+        call?.let { runCatching { it.unregisterCallback(callback) } }
+        try {
+            if (transition(LegState.ENDED, cause)) endpoint.log("cell $id ended: $cause")
+        } finally { endpoint.onLegEnded(this) }
     }
 
     private fun causeFromTelecom(): HangupCause {
+        hangupRequested?.let { return it }
         val dc = call?.details?.disconnectCause ?: return hangupRequested ?: HangupCause.NORMAL
         val answered = state == LegState.CONNECTED
         val reason = dc.reason.orEmpty().uppercase()
@@ -138,6 +184,7 @@ class CellularLeg internal constructor(
 
     override fun answer() {
         main.post {
+            if (stopping || !endpoint.owns(this)) return@post
             val c = call ?: return@post
             if (c.state == Call.STATE_RINGING) c.answer(VideoProfile.STATE_AUDIO_ONLY)
         }
@@ -147,12 +194,13 @@ class CellularLeg internal constructor(
         main.post {
             if (state == LegState.ENDED) return@post
             hangupRequested = cause
+            stopMedia()
             val c = call
             if (c == null) {
                 // Outbound placement still pending: end now, disconnect if Telecom reports it later.
                 finish(cause)
             } else {
-                disconnect(c)
+                disconnectSafely(c)
             }
         }
     }
@@ -161,8 +209,13 @@ class CellularLeg internal constructor(
         if (c.state == Call.STATE_RINGING && direction == LegDirection.INBOUND) c.reject(false, null) else c.disconnect()
     }
 
+    private fun disconnectSafely(c: Call) {
+        runCatching { disconnect(c) }.onFailure { endpoint.log("cell $id disconnect failed: ${it.javaClass.simpleName}") }
+    }
+
     override fun sendDtmf(digit: Char, durationMs: Int) {
         main.post {
+            if (stopping || !endpoint.canTap(this)) return@post
             dtmfQueue.add(digit to durationMs.coerceIn(MIN_DTMF_MS, 1000))
             if (!dtmfPlaying) playNextDtmf()
         }
@@ -171,21 +224,23 @@ class CellularLeg internal constructor(
     private fun playNextDtmf() {
         val c = call
         val next = dtmfQueue.poll()
-        if (c == null || next == null || state != LegState.CONNECTED) {
+        if (c == null || next == null || state != LegState.CONNECTED || stopping) {
             dtmfPlaying = false
             return
         }
         dtmfPlaying = true
         c.playDtmfTone(next.first)
         main.postDelayed({
-            c.stopDtmfTone()
-            main.postDelayed(::playNextDtmf, DTMF_GAP_MS)
+            if (!stopping && call === c) {
+                c.stopDtmfTone()
+                main.postDelayed(::playNextDtmf, DTMF_GAP_MS)
+            }
         }, next.second.toLong())
     }
 
     companion object {
         private const val MIN_DTMF_MS = 100
         private const val DTMF_GAP_MS = 60L
-        private val audioExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "cell-audio-open").apply { isDaemon = true } }
+        internal val audioExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "cell-audio-open").apply { isDaemon = true } }
     }
 }

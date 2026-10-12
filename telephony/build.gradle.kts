@@ -18,4 +18,6 @@ android {
 
 dependencies {
     api(project(":voice-api"))
+    testImplementation(libs.junit)
+    testImplementation(libs.mockito.core)
 }

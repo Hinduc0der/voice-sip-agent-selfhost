@@ -11,6 +11,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.telecom.Call
 import android.telecom.TelecomManager
+import android.telecom.InCallService
 import android.telephony.TelephonyManager
 import io.github.sparkcyf.voicesipagent.voice.CallEndpoint
 import io.github.sparkcyf.voicesipagent.voice.CallLeg
@@ -23,6 +24,7 @@ import io.github.sparkcyf.voicesipagent.voice.Party
 import io.github.sparkcyf.voicesipagent.voice.redactNumber
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.Executor
 
 /**
  * The phone's cellular line as a [CallEndpoint], driven through the companion InCallService.
@@ -35,11 +37,12 @@ class CellularEndpoint(
     context: Context,
     internal val audioOpener: CallAudioOpener,
     private val logger: (String) -> Unit,
+    private val main: Handler = Handler(Looper.getMainLooper()),
+    internal val audioExecutor: Executor = CellularLeg.audioExecutor,
 ) : CallEndpoint {
     override val name = "cellular"
 
     private val app = context.applicationContext
-    private val main = Handler(Looper.getMainLooper())
     private val telecom = app.getSystemService(TelecomManager::class.java)
     private val telephony = app.getSystemService(TelephonyManager::class.java)
     private val statusListeners = CopyOnWriteArrayList<EndpointStatusListener>()
@@ -48,6 +51,12 @@ class CellularEndpoint(
 
     /** Legs we own, keyed by Telecom call. Main thread only. */
     private val legs = HashMap<Call, CellularLeg>()
+    private val observed = LinkedHashMap<Call, Call.Callback>()
+    private val mute = MuteLease<CellularLeg, InCallService>(
+        { it.callAudioState?.isMuted }, { svc, value -> svc.setMuted(value) })
+    @Volatile private var closed = false
+    @Volatile var hasCalls = false; private set
+    var onCallsChanged: ((CallSnapshot) -> Unit)? = null
 
     /** Outbound placements waiting for Telecom's onCallAdded. Main thread only. */
     private val pending = ArrayList<Pending>()
@@ -62,7 +71,9 @@ class CellularEndpoint(
     }
 
     fun close() {
+        closed = true
         if (current === this) current = null
+        main.post { clearCalls("endpoint closed") }
     }
 
     internal fun log(msg: String) = logger(msg)
@@ -73,6 +84,11 @@ class CellularEndpoint(
         if (s == status) return
         status = s
         statusListeners.forEach { it.onStatusChanged(this, s) }
+        if (!ready) main.post {
+            if (!status.ready) (legs.values + pending.map { it.leg }).distinct().forEach {
+                it.abortAudio("gateway unavailable: $detail")
+            }
+        }
     }
 
     override fun setIncomingCallHandler(handler: IncomingCallHandler?) {
@@ -113,24 +129,41 @@ class CellularEndpoint(
     }
 
     private fun place(leg: CellularLeg, digits: String) {
-        if (hasForeignCall()) {
+        if (leg.stopping) return
+        if (closed) { leg.failPlacement(HangupCause.UNAVAILABLE); return }
+        if (!status.ready) { leg.failPlacement(HangupCause.UNAVAILABLE); return }
+        // Permission can be revoked between dial() and this main-thread placement.
+        if (app.checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            leg.failPlacement(HangupCause.FORBIDDEN)
+            return
+        }
+        if (hasCalls || pending.isNotEmpty()) {
             log("line busy with a non-gateway call")
             leg.failPlacement(HangupCause.BUSY)
             return
         }
         val p = Pending(leg, digits, SystemClock.elapsedRealtime())
         pending += p
+        reportCalls()
         try {
             telecom.placeCall(Uri.fromParts("tel", digits, null), Bundle())
             log("placeCall ${redactNumber(digits)} (leg ${leg.id})")
+        } catch (e: SecurityException) {
+            pending -= p
+            reportCalls()
+            log("placeCall permission denied")
+            leg.failPlacement(HangupCause.FORBIDDEN)
+            return
         } catch (e: Exception) {
             pending -= p
+            reportCalls()
             log("placeCall failed: $e")
             leg.failPlacement(HangupCause.NETWORK_ERROR)
             return
         }
         main.postDelayed({
             if (pending.remove(p)) {
+                reportCalls()
                 log("leg ${leg.id}: Telecom never reported the call")
                 leg.failPlacement(HangupCause.NETWORK_ERROR)
             }
@@ -139,24 +172,37 @@ class CellularEndpoint(
 
     // ------------------------------------------------------------ InCallService callbacks (main thread)
 
-    internal fun onCallAdded(call: Call) {
+    internal fun onCallAdded(source: InCallService, call: Call) {
+        if (source !== service || closed) return
+        if (observed.containsKey(call)) return
+        val watcher = object : Call.Callback() {
+            override fun onStateChanged(call: Call, state: Int) { reconcileCalls(); reportCalls() }
+            override fun onDetailsChanged(call: Call, details: Call.Details) { reconcileCalls(); reportCalls() }
+        }
+        observed[call] = watcher
+        call.registerCallback(watcher, main)
+        hasCalls = true
         val details = call.details
         val number = details.handle?.schemeSpecificPart.orEmpty()
         when (details.callDirection) {
             Call.Details.DIRECTION_OUTGOING -> {
-                val match = pending.firstOrNull { sameNumber(it.digits, number) }
+                val match = pending.firstOrNull { sameNumber(it.digits, number) && isCellular(call) }
                 if (match == null) {
                     log("ignoring user-placed outgoing call")
+                    reconcileCalls(); reportCalls()
                     return
                 }
                 pending -= match
-                legs[call] = match.leg
+                if (!match.leg.stopping) legs[call] = match.leg
                 match.leg.bind(call)
             }
             Call.Details.DIRECTION_INCOMING -> {
                 val h = handler
-                if (h == null || hasForeignCall(except = call)) {
+                if (h == null || !status.ready || call.state != Call.STATE_RINGING || legs.isNotEmpty() ||
+                    pending.isNotEmpty() || hasForeignCall(except = call) || !isCellular(call) ||
+                    (number.isNotEmpty() && isEmergencyNumber(number))) {
                     log("leaving incoming call ${redactNumber(number)} to the phone app")
+                    reconcileCalls(); reportCalls()
                     return
                 }
                 val leg = CellularLeg("c${ids.getAndIncrement()}", LegDirection.INBOUND, Party(number.ifEmpty { null }, details.callerDisplayName), null, this, main)
@@ -167,28 +213,81 @@ class CellularEndpoint(
             }
             else -> log("ignoring call with unknown direction")
         }
+        reconcileCalls(); reportCalls()
     }
 
-    internal fun onCallRemoved(call: Call) {
+    internal fun onCallRemoved(source: InCallService, call: Call) {
+        if (source !== service) return
+        observed.remove(call)?.let { runCatching { call.unregisterCallback(it) } }
         legs.remove(call)?.onRemoved()
+        reportCalls()
     }
 
     internal fun onLegEnded(leg: CellularLeg) {
         legs.entries.removeAll { it.value === leg }
-        if (legs.isEmpty()) setMuted(false)
+        // Keep a cancelled placement match until Telecom reports it or the timeout expires,
+        // so a late owned call is disconnected rather than mistaken for a manual call.
+        reportCalls()
     }
 
     /** True if Telecom has a live call we do not own (e.g. the user's own conversation). */
     private fun hasForeignCall(except: Call? = null): Boolean {
-        val svc = service ?: return false
-        return svc.calls.any { it !== except && it !in legs && it.state != Call.STATE_DISCONNECTED }
+        return observed.keys.any { it !== except && it !in legs && it.state != Call.STATE_DISCONNECTED }
     }
 
-    internal fun setMuted(muted: Boolean) {
-        main.post {
-            val svc = service ?: return@post
-            if (svc.callAudioState?.isMuted != muted) svc.setMuted(muted)
+    internal fun owns(leg: CellularLeg) = leg.call?.let { legs[it] === leg } == true
+
+    internal fun canTap(leg: CellularLeg): Boolean = !closed && !leg.stopping && status.ready && service != null &&
+        leg.call?.let { legs[it] === leg && it.state == Call.STATE_ACTIVE && isCellular(it) } == true &&
+        observed.keys.count { it.state != Call.STATE_DISCONNECTED } == 1
+
+    internal fun acquireMute(leg: CellularLeg): Boolean {
+        if (!canTap(leg)) return false
+        val svc = service ?: return false
+        return mute.acquire(leg, svc)
+    }
+
+    internal fun releaseMute(leg: CellularLeg) {
+        mute.release(leg)
+    }
+
+    private fun reconcileCalls() {
+        if (observed.keys.count { it.state != Call.STATE_DISCONNECTED } > 1) {
+            legs.values.toList().forEach { it.abortAudio("additional call makes telephony routing unsafe") }
         }
+        legs.values.toList().filter { it.call?.let(::isCellular) != true }.forEach {
+            it.abortAudio("call is outside the cellular gateway scope")
+        }
+    }
+
+    private fun isCellular(call: Call): Boolean {
+        val details = call.details
+        if (details.hasProperty(Call.Details.PROPERTY_SELF_MANAGED) ||
+            details.hasProperty(Call.Details.PROPERTY_IS_EXTERNAL_CALL)) return false
+        val account = details.accountHandle ?: return false
+        // A managed VoIP ConnectionService can also appear in InCallService. Only SIM accounts
+        // are eligible for the global modem tap, even if their handle uses the tel scheme.
+        return runCatching { telecom.getPhoneAccount(account)?.hasCapabilities(
+            android.telecom.PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION) == true }.getOrDefault(false)
+    }
+
+    private fun clearCalls(reason: String) {
+        (legs.values + pending.map { it.leg }).distinct().forEach {
+            runCatching { it.onServiceLost(reason) }.onFailure { log("call cleanup failed: ${it.javaClass.simpleName}") }
+        }
+        legs.clear()
+        observed.forEach { (call, callback) -> runCatching { call.unregisterCallback(callback) } }
+        observed.clear()
+        // Retain cancelled placement matches until their existing timeout or a late call report.
+        reportCalls()
+    }
+
+    private fun reportCalls() {
+        val live = observed.keys.filter { it.state != Call.STATE_DISCONNECTED }
+        hasCalls = live.isNotEmpty() || pending.isNotEmpty()
+        onCallsChanged?.invoke(CallSnapshot(live.size, live.any { it.state == Call.STATE_RINGING },
+            live.count { it in legs }, if (live.isEmpty()) "No cellular call" else
+                live.joinToString { if (it in legs) "Gateway call: ${stateLabel(it.state)}" else "Other call: ${stateLabel(it.state)}" }))
     }
 
     private fun sameNumber(a: String, b: String): Boolean {
@@ -203,7 +302,7 @@ class CellularEndpoint(
         private const val PLACEMENT_TIMEOUT_MS = 10_000L
 
         @Volatile internal var current: CellularEndpoint? = null
-        @Volatile private var service: GatewayInCallService? = null
+        @Volatile private var service: InCallService? = null
 
         val isCompanionBound: Boolean get() = service != null
 
@@ -219,14 +318,28 @@ class CellularEndpoint(
             )
         }
 
-        internal fun attachService(s: GatewayInCallService) {
+        fun attachService(s: InCallService) {
+            if (service === s) return
+            if (service != null) current?.clearCalls("InCallService replaced")
             service = s
             current?.log("companion InCallService bound")
         }
 
-        internal fun detachService(s: GatewayInCallService) {
-            if (service === s) service = null
+        fun detachService(s: InCallService) {
+            if (service !== s) return
+            service = null
+            current?.clearCalls("InCallService disconnected")
             current?.log("companion InCallService unbound")
+        }
+
+        private fun stateLabel(state: Int) = when (state) {
+            Call.STATE_RINGING -> "incoming"
+            Call.STATE_ACTIVE -> "active"
+            Call.STATE_HOLDING -> "held"
+            else -> "connecting"
         }
     }
 }
+
+data class CallSnapshot(val count: Int = 0, val incoming: Boolean = false, val owned: Int = 0,
+    val summary: String = "No cellular call")
