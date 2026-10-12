@@ -31,9 +31,10 @@ class FakeLeg(kind: String, dir: LegDirection, remote: Party, target: String?) :
     AbstractCallLeg("$kind-${target ?: remote.number}", kind, dir, remote, target) {
     val actions = CopyOnWriteArrayList<String>()
     val dtmf = CopyOnWriteArrayList<Char>()
+    var autoConfirmAnswer = true
 
     override fun ring() { actions += "ring"; transition(LegState.RINGING) }
-    override fun answer() { actions += "answer"; transition(LegState.CONNECTED) }
+    override fun answer() { actions += "answer"; if (autoConfirmAnswer) transition(LegState.CONNECTED) }
     override fun hangup(cause: HangupCause) { actions += "hangup:$cause"; transition(LegState.ENDED, cause) }
     override fun sendDtmf(digit: Char, durationMs: Int) { dtmf += digit }
 

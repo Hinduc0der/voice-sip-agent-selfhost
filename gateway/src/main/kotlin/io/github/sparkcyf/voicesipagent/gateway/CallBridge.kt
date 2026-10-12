@@ -29,6 +29,7 @@ class BridgeSession internal constructor(
     var endedAtMs: Long? = null
         internal set
     internal var answerTimer: ScheduledFuture<*>? = null
+    internal var inboundAnswerRequested = false
     internal var mediaTimer: ScheduledFuture<*>? = null
 
     override fun toString() =
@@ -162,7 +163,11 @@ class CallBridge(
             return
         }
         if ((b.state == LegState.PROCEEDING || b.state == LegState.RINGING) && a.state == LegState.PROCEEDING) a.ring()
-        if (b.state == LegState.CONNECTED && a.state < LegState.CONNECTED) a.answer()
+        if (b.state == LegState.CONNECTED && a.state < LegState.CONNECTED && !s.inboundAnswerRequested) {
+            // Answer is asynchronous: media callbacks can arrive before acceptance is confirmed.
+            s.inboundAnswerRequested = true
+            a.answer()
+        }
         if (a.state == LegState.CONNECTED && b.state == LegState.CONNECTED) {
             if (s.connectedAtMs == null) {
                 s.connectedAtMs = System.currentTimeMillis()

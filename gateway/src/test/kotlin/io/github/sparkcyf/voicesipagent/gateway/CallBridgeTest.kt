@@ -91,6 +91,26 @@ class CallBridgeTest {
         assertEquals(listOf('9'), b.dtmf)
     }
 
+    @Test fun mediaArrivingBeforeAnswerConfirmationDoesNotAnswerAgain() {
+        val inbound = sip.incoming("302", target = "13800005678")
+        inbound.autoConfirmAnswer = false
+        settle()
+        val outbound = cell.dialed.single()
+        outbound.remoteAnswered(); settle()
+        assertEquals(LegState.RINGING, inbound.state)
+        assertEquals(1, inbound.actions.count { it == "answer" })
+
+        // The cellular tap comes up while the SIP 200 response still awaits confirmation.
+        outbound.mediaUp(FakePort(isClockSource = true, fill = 11)); settle()
+        assertEquals(1, inbound.actions.count { it == "answer" })
+        assertNull(bridge.session?.media)
+
+        inbound.remoteAnswered()
+        inbound.mediaUp(FakePort(isClockSource = false, fill = 22)); settle()
+        assertNotNull(bridge.session?.media)
+        assertEquals(1, inbound.actions.count { it == "answer" })
+    }
+
     @Test
     fun cellularBusyMapsToSip() {
         cell.onDial = { it.remoteEnded(HangupCause.BUSY) }
