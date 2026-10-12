@@ -150,11 +150,18 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
 
 ## Hard-won lessons (read before touching audio/privileged code)
 
-- **AudioFlinger attribution**: the Shizuku process's process-level identity is the app package while its uid is
-  2000, so AudioFlinger rejects it with `invalid attr`. Every audio object must be built explicitly with
-  `ShellEnv.shellContext()` (package / opPackage / AttributionSource all `com.android.shell`); helpers such as
-  `AudioManager.getCall*()` cannot be used.
-- **Audio attributes must match the framework helpers exactly**: the record's capture preset is
+- **AudioFlinger attribution**: Shizuku can bootstrap the gateway package under uid 2000, which AudioFlinger
+  rejects. API 30 uses a helper-local operation-package adapter. Detect `setContext(Context)` separately on
+  record and track builders: the documented introductions are API 31 for AudioRecord.Builder and API 34 for
+  AudioTrack.Builder. Audited API 30 has neither; the inspected API 32 device has only the record setter.
+  Use an explicit attributed context where supported; otherwise verify helper-local process attribution before
+  construction. The fallback wraps the existing Application base context, overriding only the operation package
+  on API 30 and also the attribution source on API 31+, preserving the Application and its real package.
+  Never merely skip a missing setter:
+  construction can succeed with mismatched attribution and silently muted playback.
+  Call helpers are attempted only when their default attribution matches. Otherwise use equivalent manual
+  redirection construction. Root attribution must use the actual uid rather than shell uid 2000.
+- **Redirection audio attributes must match the framework helpers exactly**: the record's capture preset is
   `VOICE_DOWNLINK(3)`; the track uses system usage `USAGE_CALL_ASSISTANT(17)` + `CONTENT_TYPE_SPEECH` plus
   `setCallRedirectionMode(CALL_REDIRECT_PSTN)`. These are hidden APIs, called via reflection. Without them the
   record silently falls back to the microphone and the track plays as media through the local speaker, **while

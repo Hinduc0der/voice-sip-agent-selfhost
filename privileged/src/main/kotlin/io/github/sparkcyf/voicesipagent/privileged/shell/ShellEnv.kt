@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.AudioTrack
 import android.os.Build
 import android.os.IBinder
 import android.os.Process
@@ -27,6 +29,16 @@ internal object ShellEnv {
 
     fun hasMatchingDefaultAudioAttribution(context: Context): Boolean =
         Build.VERSION.SDK_INT >= 31 && ModernAudioContext.hasMatchingDefaultAttribution(context)
+
+    fun prepareAudioAttribution(context: Context) {
+        prepareOperationPackage()
+        // API 31–33 normally has a record context setter only; the track uses process attribution.
+        if (Build.VERSION.SDK_INT >= 31 &&
+            (!AudioBuilderContext.supports(AudioRecord.Builder::class.java, Context::class.java) ||
+                !AudioBuilderContext.supports(AudioTrack.Builder::class.java, Context::class.java))) {
+            ModernAudioContext.prepareProcessAttribution(context)
+        }
+    }
 
     /** API 30 builders use ActivityThread.currentOpPackageName(), not an explicit context. */
     @Synchronized

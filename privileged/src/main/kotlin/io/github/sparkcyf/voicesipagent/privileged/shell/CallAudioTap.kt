@@ -220,9 +220,8 @@ internal class CallAudioTap(
     }
 
     private fun setContext(builder: Any) {
-        if (Build.VERSION.SDK_INT >= 31) {
-            // Hidden on some releases; no API 30 linkage to the newer builder methods.
-            builder.javaClass.getMethod("setContext", Context::class.java).invoke(builder, ctx)
+        AudioBuilderContext.apply(builder, ctx, Context::class.java) {
+            ShellEnv.prepareAudioAttribution(ctx)
         }
     }
 

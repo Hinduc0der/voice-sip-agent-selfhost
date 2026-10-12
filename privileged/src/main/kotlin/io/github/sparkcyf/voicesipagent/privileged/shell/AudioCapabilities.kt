@@ -11,8 +11,8 @@ internal data class AudioCapabilities(val direct: Boolean, val redirect: Boolean
     companion object {
         fun inspect(ctx: Context): AudioCapabilities {
             val failures = mutableListOf<String>()
-            val attribution = runCatching { ShellEnv.prepareOperationPackage() }.onFailure {
-                failures += "operation package: ${it.message}"
+            val attribution = runCatching { ShellEnv.prepareAudioAttribution(ctx) }.onFailure {
+                failures += "audio attribution: ${it.message}"
             }.isSuccess
             fun permission(name: String): Boolean = ShellEnv.hasPermission("android.permission.$name", ctx)
             val directMissing = listOf("RECORD_AUDIO", "CAPTURE_AUDIO_OUTPUT", "MODIFY_PHONE_STATE").filterNot(::permission)
