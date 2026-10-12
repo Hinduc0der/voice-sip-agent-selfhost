@@ -27,9 +27,34 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     private var lastTapStats = "no tap yet"
     private val audioManager by lazy { ShellEnv.audioManager(shellCtx) }
 
-    /** Guards [localMuted]; never held while taking the service or tap monitors (tap close calls back in). */
+    /** Never held while taking the service or tap monitors (tap close calls back in). */
     private val muteLock = Any()
-    private var localMuted = false
+    private var muteTapOwner: Any? = null
+    private val localOutputMute by lazy {
+        LocalOutputMute(object : LocalOutputMute.AudioControl {
+            override val mode get() = audioManager.mode
+            override val voiceCallMuted get() = audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)
+            @SuppressLint("WrongConstant")
+            override fun requestMode(mode: Int) { audioManager.mode = mode }
+            override fun requestVoiceCallMute(muted: Boolean) {
+                // The helper holds MODIFY_PHONE_STATE. This mutes output without changing the saved
+                // volume index; Telecom separately owns microphone mute. Stream mute is global and,
+                // unlike a mode request, is not automatically removed on abrupt helper-process death.
+                audioManager.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL,
+                    if (muted) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE, 0)
+            }
+            override fun awaitMode(wanted: Int) = this@PrivilegedService.awaitMode(wanted)
+            override fun awaitVoiceCallMute(wanted: Boolean): Boolean {
+                val end = SystemClock.elapsedRealtime() + 600
+                var observed = voiceCallMuted
+                while (observed != wanted && SystemClock.elapsedRealtime() < end) {
+                    SystemClock.sleep(50)
+                    observed = voiceCallMuted
+                }
+                return observed
+            }
+        })
+    }
 
     init {
         Log.i(TAG, "created uid=${Process.myUid()} for $appPackage")
@@ -102,7 +127,11 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     override fun openCallAudio(method: Int, sampleRate: Int): ParcelFileDescriptor {
         enforceCaller()
         closeCallAudio()
-        val t = CallAudioTap(shellCtx, method, sampleRate) { restoreLocal("tap closed") }
+        val owner = Any()
+        val t = CallAudioTap(shellCtx, method, sampleRate) { onTapClosed(owner) }
+        // Register before starting the worker threads so a tap that closes during open cannot later
+        // acquire a mute lease. setLocalOutputMuted is serialized with open/close on the service.
+        synchronized(muteLock) { muteTapOwner = owner }
         return try {
             asHelper { t.open() }.also { tap = t }
         } catch (e: Throwable) {
@@ -120,6 +149,8 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
             lastTapStats = it.stats()
         }
         tap = null
+        // Also retries a restore that failed in the tap callback, or after an earlier close.
+        restoreLocal("tap closed")
     }
 
     override fun audioStats(): String {
@@ -127,6 +158,7 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         return tap?.stats() ?: lastTapStats
     }
 
+    @Synchronized
     override fun setLocalOutputMuted(muted: Boolean): String {
         enforceCaller()
         return asHelper { if (muted) muteLocal() else restoreLocal("requested") }
@@ -137,37 +169,31 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         return try { block() } finally { Binder.restoreCallingIdentity(token) }
     }
 
-    /**
-     * Switches the audio mode from IN_CALL to CALL_REDIRECT. Audio policy then tears down the
-     * modem<->earpiece/mic patches while the redirected record/track keep working. Shell holds
-     * MODIFY_PHONE_STATE, so its (newer) mode request outranks Telecom's IN_CALL. AudioService drops
-     * the request if this process dies, so a crash cannot leave the phone stuck in this mode.
-     */
-    // MODE_CALL_REDIRECT is a system API constant, guarded below and absent from public SDK stubs.
-    @SuppressLint("WrongConstant")
     private fun muteLocal(): String = synchronized(muteLock) {
-        if (Build.VERSION.SDK_INT < 33) return "unavailable: handset suppression requires API 33"
-        if (localMuted) return "already muted"
-        if (tap == null) return "no tap open"
-        if (tap?.usedMethod?.startsWith("redirection") != true) return "unavailable for direct telephony audio"
-        val before = audioManager.mode
-        if (before != AudioManager.MODE_IN_CALL) return "skipped: mode=$before"
-        audioManager.mode = MODE_CALL_REDIRECT
-        val after = awaitMode(MODE_CALL_REDIRECT)
-        localMuted = after == MODE_CALL_REDIRECT
-        val r = "mode $before->$after"
-        Log.i(TAG, "local mute: $r")
-        r
+        val current = tap
+        if (current == null || muteTapOwner == null) return "no tap open"
+        // Redirected taps keep working when mode 5 tears down the handset patches. Direct telephony
+        // taps need IN_CALL to remain active, so silence only their voice-call output stream.
+        localOutputMute.mute(Build.VERSION.SDK_INT >= 33 && current.usedMethod.startsWith("redirection"))
+            .also { Log.i(TAG, "local mute: $it") }
     }
 
-    private fun restoreLocal(why: String): String = synchronized(muteLock) {
-        if (!localMuted) return "not muted"
-        localMuted = false
-        // NORMAL withdraws our request; the mode falls back to Telecom's (IN_CALL, or NORMAL after hangup).
-        audioManager.mode = AudioManager.MODE_NORMAL
-        val r = "restored ($why), mode=${awaitMode(-1)}"
-        Log.i(TAG, "local mute: $r")
-        r
+    private fun onTapClosed(owner: Any) = asHelper {
+        synchronized(muteLock) {
+            if (muteTapOwner === owner) {
+                muteTapOwner = null
+                restoreLocal("tap closed")
+            }
+        }
+    }
+
+    // Tap callbacks may run inside an app's Binder transaction. Always restore as the helper UID.
+    private fun restoreLocal(why: String): String = asHelper {
+        synchronized(muteLock) {
+            localOutputMute.restore(why).also {
+                if (it != "not muted") Log.i(TAG, "local mute: $it")
+            }
+        }
     }
 
     /** Mode changes are applied asynchronously by AudioService; wait briefly for [want] (-1: just settle). */
@@ -199,8 +225,6 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
 
     companion object {
         private const val TAG = "VsaPrivileged"
-        /** AudioManager.MODE_CALL_REDIRECT (API 33, system API). */
-        private const val MODE_CALL_REDIRECT = 5
         private val RUNTIME_PERMISSIONS = listOf(
             "android.permission.CALL_PHONE",
             "android.permission.READ_PHONE_STATE",

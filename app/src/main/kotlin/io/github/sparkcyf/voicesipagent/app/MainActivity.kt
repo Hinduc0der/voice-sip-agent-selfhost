@@ -127,9 +127,16 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                     enabled = { it != AudioMethod.OFFICIAL || Build.VERSION.SDK_INT >= 33 }) {
                     rt.applySettings(cur.copy(audioMethod = it))
                 }
-                Toggle("Silence handset during bridged calls", cur.muteEarpiece, { rt.setMuteEarpiece(it) }) {
-                    if (h.privileged?.get(HealthKeys.LOCAL_SUPPRESSION) == true && cur.audioMethod != AudioMethod.LEGACY)
-                        "Automatic when call redirection supports it; applies from next call"
+                Toggle("Mute local call output", cur.muteEarpiece, { rt.setMuteEarpiece(it) }) {
+                    val backendAvailable = when (cur.audioMethod) {
+                        AudioMethod.LEGACY -> h.privileged?.get(HealthKeys.DIRECT_AUDIO) == true
+                        AudioMethod.OFFICIAL -> h.privileged?.get(HealthKeys.REDIRECT_AUDIO) == true
+                        else -> true
+                    }
+                    if (!cur.muteEarpiece)
+                        "Keeps normal call output for local listening; microphone stays muted. Applies from next call."
+                    else if (h.privileged?.get(HealthKeys.LOCAL_SUPPRESSION) == true && backendAvailable)
+                        "Mutes call output when supported; applies from next call"
                     else "Unavailable with the current platform or audio method"
                 }
                 Toggle("Loopback test (echo inbound calls)", h.loopbackTest, { rt.setLoopbackTest(it) }) { "Echoes incoming calls instead of connecting the PBX" }

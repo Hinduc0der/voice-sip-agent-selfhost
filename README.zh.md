@@ -8,7 +8,7 @@
 - **蜂窝来电 → SIP**：蜂窝来电会呼叫 PBX 上的一个 DID；SIP 侧有人接听后才接听蜂窝来电，主叫号码通过
   `P-Asserted-Identity` 传递。
 - **SIP 去电 → 蜂窝**：PBX 把呼叫送到 trunk，由手机经蜂窝网络拨出。
-- 通话音频通过 Android 的通话重定向 API 截取和注入，桥接期间手机自己的听筒和麦克风可以保持静音。
+- 通话音频通过直接电话路由或 Android 的通话重定向 API 截取和注入。桥接期间可静音本机通话输出，本机麦克风始终保持静音。
 
 特权操作（通话音频拦截、Telecom 伴侣覆盖、appops）通过以 shell 用户（uid 2000）运行的
 [Shizuku](https://shizuku.rikka.app/) 完成，**不需要 root**。项目依赖隐藏的系统 API，这也是它只在 GitHub Releases
@@ -85,7 +85,7 @@ PCMU/PCMA 保持 VAD 关闭并连续发送。PCM 采集和音频桥仍每 20 ms 
 | User / password | PBX 上 trunk 的凭据 |
 | Cellular inbound → SIP target | 蜂窝来电时在 PBX 上呼叫的 DID；留空则使用 SIP 用户名 |
 | Allowed dial-out prefixes | 逗号分隔；留空表示允许拨出任何号码 |
-| Silence handset | 桥接期间保持本机听筒和麦克风关闭 |
+| Mute local call output | 开启：尝试静音通话输出。关闭：保留正常通话输出供本地监听。从下次通话生效；本机麦克风仍保持静音。 |
 
 TLS 用 Android 系统 CA 库校验服务器证书链和主机名，仅支持 TLS 1.2/1.3，接受最左一级的 `*.` 通配证书（RFC 6125）。
 不做降级：TLS 失败就注册失败，每 30 s 重试。

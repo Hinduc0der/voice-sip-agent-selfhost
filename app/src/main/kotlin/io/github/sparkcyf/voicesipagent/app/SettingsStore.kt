@@ -16,7 +16,7 @@ import javax.crypto.spec.GCMParameterSpec
 data class GatewaySettings(
     /** Master switch. Off: the app leaves every call alone, exactly as if it were not installed. */
     val takeover: Boolean = true,
-    /** Silence the handset earpiece/mic while a call is bridged. */
+    /** Mute local call output while bridged. Telecom manages microphone mute independently. */
     val muteEarpiece: Boolean = true,
     val server: String = "",
     val port: Int = 5060,

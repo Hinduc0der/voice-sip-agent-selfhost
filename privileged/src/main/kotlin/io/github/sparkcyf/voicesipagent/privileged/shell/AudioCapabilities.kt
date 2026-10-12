@@ -26,8 +26,11 @@ internal data class AudioCapabilities(val direct: Boolean, val redirect: Boolean
             val redirect = attribution && redirectionApi && permission("CALL_AUDIO_INTERCEPTION")
             if (!redirectionApi) failures += "call redirection API unavailable"
             else if (!redirect) failures += "CALL_AUDIO_INTERCEPTION unavailable"
-            return AudioCapabilities(attribution && directMissing.isEmpty(), redirect,
-                redirect && permission("MODIFY_PHONE_STATE"), failures.joinToString("; "))
+            val direct = attribution && directMissing.isEmpty()
+            // A preflight permission check, not proof of handset silence: vendor policy/HAL may
+            // reject stream mute. Direct taps use it even before the redirection APIs exist.
+            val suppression = (direct || redirect) && permission("MODIFY_PHONE_STATE")
+            return AudioCapabilities(direct, redirect, suppression, failures.joinToString("; "))
         }
     }
 }

@@ -137,16 +137,20 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
 
 ### Takeover switch and handset muting
 
-- **takeover=false**: disables the `GatewayInCallService` component, removes the Telecom companion override and
-  unregisters SIP — the phone behaves as if the app were not installed. Turning it off during a call takes effect
-  when the call ends (`takeoverOffPending`).
+- **takeover=false**: disables companion integration and unregisters SIP. When holding the default-dialer role,
+  keep the dialer activity/service enabled for recovery and offer switching to the usual dialer. Turning off
+  during a call takes effect when current Telecom calls and the bridge session end (`takeoverOffPending`).
 - **The companion override is a plain list**: adding appends a duplicate, removing deletes one entry. `setup` must
   count the existing entries before adding or removing them one by one.
-- **Earpiece mute**: once the tap is open, the shell process switches the audio mode from `IN_CALL(2)` to
-  `MODE_CALL_REDIRECT(5)`. The policy layer tears down the baseband ↔ earpiece/mic route while the redirected
-  record/track keep working. When the tap closes (`onClosed`) the mode goes back to NORMAL, i.e. our mode request
-  is withdrawn; AudioService also withdraws it if the process dies. `cmd audio adj-mute` no longer exists on
-  Android 17.
+- **Earpiece mute**: supported redirection taps switch `IN_CALL(2)` to `MODE_CALL_REDIRECT(5)`, tearing down
+  the baseband ↔ earpiece/mic route while the redirected record/track keep working. Direct taps (also API 30–32)
+  keep IN_CALL and use `adjustStreamVolume(STREAM_VOICE_CALL, ADJUST_MUTE, 0)` under the helper's identity with
+  MODIFY_PHONE_STATE. Telecom manages microphone mute separately. Tap close restores only our changes:
+  NORMAL withdraws our mode request; ADJUST_UNMUTE clears an owned stream mute without changing its volume
+  index. Preserve an initially-muted stream and retain failed restoration for retry. AudioService drops mode
+  requests on helper death, but abrupt death can leave global stream mute active; raising call volume can
+  unmute it. Stream-mute effectiveness and capture/injection interactions require physical verification.
+  `cmd audio adj-mute` no longer exists on Android 17.
 
 ## Hard-won lessons (read before touching audio/privileged code)
 

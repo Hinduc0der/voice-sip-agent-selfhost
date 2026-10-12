@@ -37,8 +37,9 @@ interface IPrivilegedService {
     String audioStats() = 6;
 
     /**
-     * Silences the handset's own earpiece/mic path for the current call (true) or restores it.
-     * Only valid while the tap is open; closing the tap always restores. Returns a short report.
+     * Silences local call output (true) or restores our changes. Redirection taps use audio mode;
+     * direct taps mute the voice-call stream. Telecom manages microphone mute separately.
+     * Muting requires an open tap; tap close attempts restoration. Returns observed state/failures.
      */
     String setLocalOutputMuted(boolean muted) = 7;
 

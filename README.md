@@ -8,8 +8,8 @@ Turn an **unrooted** Android phone into a single-line **cellular ↔ SIP gateway
 - **Cellular → SIP**: an incoming cellular call rings a DID on the PBX; the cellular call is answered only once
   someone picks up on the SIP side, and the caller ID is passed in `P-Asserted-Identity`.
 - **SIP → cellular**: the PBX sends a call to the trunk and the phone places it on the cellular network.
-- Call audio is captured and injected with Android's call-redirection APIs, so the phone's own earpiece and
-  microphone can stay silent while a call is bridged.
+- Call audio is captured and injected through direct telephony routing or Android's call-redirection APIs.
+  Local call output can be muted while bridging; the handset microphone stays muted.
 
 Privileged operations (call-audio interception, the Telecom companion override, appops) are performed through
 [Shizuku](https://shizuku.rikka.app/) running as the shell user (uid 2000) — **no root required**. This relies on
@@ -102,7 +102,7 @@ The handset microphone stays muted while bridging, so local listening does not e
 | User / password | Trunk credentials on the PBX |
 | Cellular inbound → SIP target | DID dialed on the PBX for incoming cellular calls; blank = the SIP user name |
 | Allowed dial-out prefixes | Comma-separated; empty = any number may be dialed out |
-| Silence handset | Keeps the phone's earpiece and microphone off while a call is bridged |
+| Mute local call output | On: attempts to silence call output. Off: keeps normal call output for local listening. Applies from next call; the handset microphone stays muted. |
 
 TLS validates the server certificate chain and host name against the Android system CA store (TLS 1.2/1.3 only)
 and accepts `*.` wildcard certificates in the left-most label (RFC 6125). There is no downgrade: if TLS fails,
