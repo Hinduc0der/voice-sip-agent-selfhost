@@ -5,9 +5,13 @@ import android.os.Build
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -101,7 +105,11 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
             }
             if (roleMessage.isNotEmpty()) Text(roleMessage)
             if (h.holdsDialer) OutlinedButton(onClick = switchDialer) { Text("Switch dialer") }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 if (h.shizuku == ShizukuConnector.State.PERMISSION_REQUIRED || h.shizuku == ShizukuConnector.State.PERMISSION_DENIED) {
                     Button(onClick = { rt.shizuku.requestPermission() }) { Text("Grant Shizuku") }
                 }
@@ -114,6 +122,10 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
             Text(h.session ?: "No active session")
         }
         SettingsSection(rt)
+        Section("Log") {
+            Text(log.takeLast(60).reversed().joinToString("\n"), fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp, lineHeight = 14.sp)
+        }
         var advanced by remember { mutableStateOf(false) }
         OutlinedButton(onClick = { advanced = !advanced }) { Text(if (advanced) "Hide advanced settings" else "Advanced settings") }
         if (advanced) {
@@ -149,8 +161,6 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                 Text(h.privilegedDetail)
                 Text(h.lastSetupLog)
                 Text("Audio access and frame counters do not verify remote delivery. Verify both directions on this device.")
-                Text(log.takeLast(60).reversed().joinToString("\n"), fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp, lineHeight = 14.sp)
             }
         }
     }
@@ -219,9 +229,10 @@ private fun <T> Choice(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, style = MaterialTheme.typography.bodySmall)
-        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
             options.forEachIndexed { i, opt ->
                 SegmentedButton(
+                    modifier = Modifier.fillMaxHeight(),
                     selected = opt == selected,
                     onClick = { onSelect(opt) },
                     enabled = enabled(opt),

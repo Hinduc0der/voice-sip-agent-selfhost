@@ -79,8 +79,8 @@ Emergency numbers are always refused and are never dialed through the gateway.
    use **Switch dialer** to return normal call handling to your usual dialer.
 
 Advanced settings are collapsed by default. They contain call-access and cellular-audio choices, automatic
-handset suppression when supported, loopback, logging, and diagnostics. Direct telephony audio does not use
-the modern redirection helpers. Direct telephony audio uses voice-call stream mute for handset output,
+handset suppression when supported, loopback, debug logging, and diagnostics. The call log remains visible
+outside Advanced. Direct telephony audio skips the modern redirection helpers and uses voice-call stream mute for handset output,
 including on API 30–32; supported redirection taps retain mode-based suppression. The helper restores its
 changes when the tap closes and preserves an already-muted stream. Device policy/HAL support and both
 audio directions still need testing with suppression enabled. If the helper is forcibly killed, stream
