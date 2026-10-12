@@ -1,10 +1,12 @@
 package io.github.sparkcyf.voicesipagent.privileged.shell
 
-import android.content.AttributionSource
+import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
 import android.media.AudioManager
+import android.os.Build
 import android.os.IBinder
+import android.os.Process
 import java.util.concurrent.TimeUnit
 
 /**
@@ -16,8 +18,41 @@ internal object ShellEnv {
     const val SHELL_UID = 2000
     const val SHELL_PACKAGE = "com.android.shell"
 
-    /** Context attributed to the shell package; validated in app_process by the feasibility probe. */
-    fun shellContext(fallback: Context): Context = ShellContext(systemContext() ?: fallback)
+    private var operationPackagePrepared = false
+
+    fun shellContext(fallback: Context): Context {
+        val base = systemContext() ?: fallback
+        return if (Build.VERSION.SDK_INT >= 31) ModernAudioContext.create(base) else base
+    }
+
+    fun hasMatchingDefaultAudioAttribution(context: Context): Boolean =
+        Build.VERSION.SDK_INT >= 31 && ModernAudioContext.hasMatchingDefaultAttribution(context)
+
+    /** API 30 builders use ActivityThread.currentOpPackageName(), not an explicit context. */
+    @Synchronized
+    fun prepareOperationPackage() {
+        if (Build.VERSION.SDK_INT != 30 || operationPackagePrepared) return
+        val uid = Process.myUid()
+        check(uid == SHELL_UID || uid == 0) { "unsupported helper uid $uid" }
+        val at = Class.forName("android.app.ActivityThread")
+        val application = at.getMethod("currentApplication").invoke(null) as? Application
+        // Older Shizuku has no initial Application: playback already uses an empty package.
+        if (application != null) {
+            val expected = if (uid == SHELL_UID) SHELL_PACKAGE else ""
+            val wrapper = object : ContextWrapper(application.baseContext) {
+                override fun getOpPackageName() = expected
+            }
+            val field = ContextWrapper::class.java.getDeclaredField("mBase").apply { isAccessible = true }
+            field.set(application, wrapper)
+            check(at.getMethod("currentOpPackageName").invoke(null) == expected) {
+                "API 30 operation package adapter did not take effect"
+            }
+        }
+        operationPackagePrepared = true
+    }
+
+    fun hasPermission(permission: String, ctx: Context): Boolean =
+        ctx.checkPermission(permission, Process.myPid(), Process.myUid()) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
     private fun systemContext(): Context? = try {
         val at = Class.forName("android.app.ActivityThread")
@@ -61,12 +96,4 @@ internal object ShellEnv {
         return Result(p.exitValue(), synchronized(out) { out.toString() })
     }
 
-    private class ShellContext(base: Context) : ContextWrapper(base) {
-        override fun getPackageName() = SHELL_PACKAGE
-        override fun getOpPackageName() = SHELL_PACKAGE
-        override fun getAttributionSource(): AttributionSource =
-            AttributionSource.Builder(SHELL_UID).setPackageName(SHELL_PACKAGE).build()
-        override fun getApplicationContext(): Context = this
-        override fun getDeviceId() = 0
-    }
 }

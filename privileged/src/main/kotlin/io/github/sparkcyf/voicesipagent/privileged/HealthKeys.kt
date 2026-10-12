@@ -8,8 +8,13 @@ object HealthKeys {
     const val INTERCEPTABLE = "pstn_interceptable"
     const val DOZE_ALLOWLISTED = "doze_allowlisted"
     const val DETAIL = "detail"
+    const val DIRECT_AUDIO = "direct_audio"
+    const val REDIRECT_AUDIO = "redirect_audio"
+    const val LOCAL_SUPPRESSION = "local_suppression"
+    const val AUDIO_DETAIL = "audio_detail"
 
-    val BOOLEAN_KEYS = listOf(MANAGE_ONGOING_CALLS, COMPANION_OVERRIDE, INTERCEPTABLE, DOZE_ALLOWLISTED)
+    val BOOLEAN_KEYS = listOf(MANAGE_ONGOING_CALLS, COMPANION_OVERRIDE, INTERCEPTABLE, DOZE_ALLOWLISTED,
+        DIRECT_AUDIO, REDIRECT_AUDIO, LOCAL_SUPPRESSION)
 }
 
 object AudioMethod {

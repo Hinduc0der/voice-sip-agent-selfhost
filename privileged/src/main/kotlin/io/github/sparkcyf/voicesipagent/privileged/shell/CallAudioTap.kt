@@ -9,6 +9,8 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.ParcelFileDescriptor
+import android.os.Build
+import android.os.SystemClock
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
@@ -38,6 +40,9 @@ internal class CallAudioTap(
     private var closed = false
     private var downThread: Thread? = null
     private var upThread: Thread? = null
+    private var modeThread: Thread? = null
+    private val audioManager by lazy { ShellEnv.audioManager(ctx) }
+    private var backendFailures = ""
 
     @Volatile var usedMethod = "none"; private set
     @Volatile var downFrames = 0L; private set
@@ -74,6 +79,15 @@ internal class CallAudioTap(
             check(track.playState == AudioTrack.PLAYSTATE_PLAYING) { "track did not start at $rate Hz" }
             downThread = Thread(::downLoop, "tap-down").apply { priority = Thread.MAX_PRIORITY; start() }
             upThread = Thread(::upLoop, "tap-up").apply { priority = Thread.MAX_PRIORITY; start() }
+            modeThread = Thread({
+                while (running) {
+                    SystemClock.sleep(200)
+                    if (running && !isCellularMode(audioManager.mode)) {
+                        error = "cellular audio mode lost: ${audioManager.mode}"
+                        close()
+                    }
+                }
+            }, "tap-mode").apply { isDaemon = true; start() }
             Log.i(TAG, "tap open method=$usedMethod rate=$rate frameBytes=$frameBytes")
             return pfd
         } catch (t: Throwable) {
@@ -86,23 +100,28 @@ internal class CallAudioTap(
     }
 
     private fun openAudio() {
+        require(method in AudioMethod.AUTO..AudioMethod.LEGACY) { "unknown audio method $method" }
+        check(isCellularMode(audioManager.mode)) { "not in a cellular call: audio mode=${audioManager.mode}" }
+        val capabilities = AudioCapabilities.inspect(ctx)
         val failures = ArrayList<String>()
         if (method == AudioMethod.AUTO || method == AudioMethod.OFFICIAL) {
-            // Same objects AudioManager.getCall{Downlink,Uplink}*() would build, but with an explicit
-            // shell-attributed Context: the helpers take attribution from the process, which in the
-            // Shizuku UserService is the app package and is rejected by AudioFlinger for uid 2000.
+            // Use the framework helpers when process attribution matches the helper identity;
+            // otherwise construct equivalent objects with the explicit attributed context.
             try {
+                check(capabilities.redirect) { capabilities.detail }
                 openRedirected()
-                usedMethod = "official"
                 return
             } catch (t: Throwable) {
                 failures += "official: ${describe(t)}"
+                releaseAudio()
                 if (method == AudioMethod.OFFICIAL) throw IllegalStateException(failures.joinToString("; "))
             }
         }
         try {
+            check(capabilities.direct) { capabilities.detail }
             openLegacy()
-            usedMethod = "legacy"
+            usedMethod = "direct"
+            backendFailures = failures.joinToString("; ")
         } catch (t: Throwable) {
             failures += "legacy: ${describe(t)}"
             throw IllegalStateException(failures.joinToString("; "))
@@ -110,6 +129,25 @@ internal class CallAudioTap(
     }
 
     private fun openRedirected() {
+        check(ShellEnv.isPstnCallAudioInterceptable() != false) { "PSTN audio interception unavailable" }
+        // Helpers are usable only when their process-default attribution is valid. If Shizuku's
+        // bootstrap uses the gateway package, use equivalent construction with the helper context.
+        val helperFailure = runCatching {
+            check(ShellEnv.hasMatchingDefaultAudioAttribution(ctx)) {
+                "process-default audio attribution does not match helper; using explicit context"
+            }
+            record = AudioManager::class.java.getMethod("getCallDownlinkExtractionAudioRecord", AudioFormat::class.java)
+                .invoke(audioManager, format(AudioFormat.CHANNEL_IN_MONO)) as AudioRecord
+            track = AudioManager::class.java.getMethod("getCallUplinkInjectionAudioTrack", AudioFormat::class.java)
+                .invoke(audioManager, format(AudioFormat.CHANNEL_OUT_MONO)) as AudioTrack
+            check(record.state == AudioRecord.STATE_INITIALIZED && track.state == AudioTrack.STATE_INITIALIZED)
+        }.exceptionOrNull()
+        if (helperFailure == null) {
+            usedMethod = "redirection-helper"
+            return
+        }
+        releaseAudio()
+        backendFailures = "helper: ${describe(helperFailure)}"
         val pstn = runCatching { AudioManager::class.java.getField("CALL_REDIRECT_PSTN").getInt(null) }.getOrDefault(1)
         val int = Int::class.javaPrimitiveType
         // Attributes must match the AudioManager helpers exactly: without them the record falls back to the
@@ -118,7 +156,8 @@ internal class CallAudioTap(
             AudioAttributes.Builder::class.java.getMethod("setInternalCapturePreset", int)
                 .invoke(it, MediaRecorder.AudioSource.VOICE_DOWNLINK)
         }.build()
-        val rb = AudioRecord.Builder().setContext(ctx).setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO))
+        val rb = AudioRecord.Builder().setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO))
+        setContext(rb)
         AudioRecord.Builder::class.java.getMethod("setAudioAttributes", AudioAttributes::class.java).invoke(rb, recAttr)
         AudioRecord.Builder::class.java.getMethod("setCallRedirectionMode", int).invoke(rb, pstn)
         record = rb.build()
@@ -127,11 +166,13 @@ internal class CallAudioTap(
             val trackAttr = AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).also {
                 AudioAttributes.Builder::class.java.getMethod("setSystemUsage", int).invoke(it, USAGE_CALL_ASSISTANT)
             }.build()
-            val tb = AudioTrack.Builder().setContext(ctx).setAudioAttributes(trackAttr)
+            val tb = AudioTrack.Builder().setAudioAttributes(trackAttr)
                 .setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
+            setContext(tb)
             AudioTrack.Builder::class.java.getMethod("setCallRedirectionMode", int).invoke(tb, pstn)
             track = tb.build()
             check(track.state == AudioTrack.STATE_INITIALIZED) { "PSTN track not initialized at $rate Hz" }
+            usedMethod = "redirection-manual"
             Log.i(TAG, "redirected: record src=${record.audioSource} dev=${record.routedDevice?.type} " +
                 "track usage=${track.audioAttributes.usage}")
         } catch (t: Throwable) {
@@ -145,26 +186,26 @@ internal class CallAudioTap(
     private fun openLegacy() {
         val minRec = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         check(minRec > 0) { "record buffer size $minRec at $rate Hz" }
-        record = AudioRecord.Builder().setContext(ctx).setAudioSource(MediaRecorder.AudioSource.VOICE_DOWNLINK)
-            .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(minRec, frameBytes * 10)).build()
+        record = AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_DOWNLINK)
+            .setAudioFormat(format(AudioFormat.CHANNEL_IN_MONO)).setBufferSizeInBytes(maxOf(minRec, frameBytes * 10))
+            .also(::setContext).build()
         try {
             check(record.state == AudioRecord.STATE_INITIALIZED) { "VOICE_DOWNLINK record not initialized at $rate Hz" }
             val minTrack = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             check(minTrack > 0) { "track buffer size $minTrack at $rate Hz" }
             track = AudioTrack.Builder()
-                .setContext(ctx)
                 .setAudioAttributes(
                     AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(),
                 )
                 .setAudioFormat(format(AudioFormat.CHANNEL_OUT_MONO))
                 .setBufferSizeInBytes(maxOf(minTrack, frameBytes * 10))
-                .setTransferMode(AudioTrack.MODE_STREAM).build()
+                .setTransferMode(AudioTrack.MODE_STREAM).also(::setContext).build()
             check(track.state == AudioTrack.STATE_INITIALIZED) { "telephony track not initialized at $rate Hz" }
             val am = ShellEnv.audioManager(ctx)
             val tx = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.type == AudioDeviceInfo.TYPE_TELEPHONY }
             if (tx == null || !track.setPreferredDevice(tx)) {
-                error("no TYPE_TELEPHONY sink")
+                error(if (tx == null) "TYPE_TELEPHONY output unavailable" else "telephony preferred-device request rejected")
             }
         } catch (t: Throwable) {
             record.release()
@@ -172,6 +213,21 @@ internal class CallAudioTap(
             throw t
         }
     }
+
+    private fun setContext(builder: Any) {
+        if (Build.VERSION.SDK_INT >= 31) {
+            // Hidden on some releases; no API 30 linkage to the newer builder methods.
+            builder.javaClass.getMethod("setContext", Context::class.java).invoke(builder, ctx)
+        }
+    }
+
+    private fun releaseAudio() {
+        if (::record.isInitialized) runCatching { record.release() }
+        if (::track.isInitialized) runCatching { track.release() }
+    }
+
+    private fun isCellularMode(mode: Int) = mode == AudioManager.MODE_IN_CALL ||
+        (Build.VERSION.SDK_INT >= 33 && mode == 5)
 
     private fun downLoop() {
         val buf = ByteArray(frameBytes)
@@ -245,12 +301,15 @@ internal class CallAudioTap(
         try { Os.close(local) } catch (_: Throwable) {}
         downThread = null
         upThread = null
+        modeThread = null
         Log.i(TAG, "tap closed ${stats()}")
         runCatching(onClosed).onFailure { Log.w(TAG, "onClosed failed: $it") }
     }
 
     fun stats() = "method=$usedMethod rate=$rate frameBytes=$frameBytes down=$downFrames up=$upFrames downPeak=$downPeak upPeak=$upPeak " +
         "downVoiced=$downVoiced upVoiced=$upVoiced" +
+        " backendFailures=$backendFailures preferred=${if (::track.isInitialized) runCatching { track.preferredDevice?.type }.getOrNull() else null}" +
+        " routed=${if (::track.isInitialized) runCatching { track.routedDevice?.type }.getOrNull() else null}" +
         (error?.let { " error=$it" } ?: "")
 
     private fun peak(b: ByteArray, size: Int = b.size): Int {

@@ -3,6 +3,7 @@ package io.github.sparkcyf.voicesipagent.privileged.shell
 import android.content.Context
 import android.media.AudioManager
 import android.os.Binder
+import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.os.Process
@@ -78,6 +79,11 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         val icp = ShellEnv.isPstnCallAudioInterceptable()
         b.putBoolean(HealthKeys.INTERCEPTABLE, icp == true)
         b.putString(HealthKeys.DETAIL, if (icp == null) "isPstnCallAudioInterceptable unavailable" else "")
+        val capabilities = asHelper { AudioCapabilities.inspect(shellCtx) }
+        b.putBoolean(HealthKeys.DIRECT_AUDIO, capabilities.direct)
+        b.putBoolean(HealthKeys.REDIRECT_AUDIO, capabilities.redirect)
+        b.putBoolean(HealthKeys.LOCAL_SUPPRESSION, capabilities.suppression)
+        b.putString(HealthKeys.AUDIO_DETAIL, capabilities.detail)
         return b
     }
 
@@ -87,7 +93,7 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
         closeCallAudio()
         val t = CallAudioTap(shellCtx, method, sampleRate) { restoreLocal("tap closed") }
         return try {
-            t.open().also { tap = t }
+            asHelper { t.open() }.also { tap = t }
         } catch (e: Throwable) {
             lastTapStats = t.stats()
             Log.w(TAG, "openCallAudio failed: $e")
@@ -112,7 +118,12 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
 
     override fun setLocalOutputMuted(muted: Boolean): String {
         enforceCaller()
-        return if (muted) muteLocal() else restoreLocal("requested")
+        return asHelper { if (muted) muteLocal() else restoreLocal("requested") }
+    }
+
+    private inline fun <T> asHelper(block: () -> T): T {
+        val token = Binder.clearCallingIdentity()
+        return try { block() } finally { Binder.restoreCallingIdentity(token) }
     }
 
     /**
@@ -122,8 +133,10 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
      * the request if this process dies, so a crash cannot leave the phone stuck in this mode.
      */
     private fun muteLocal(): String = synchronized(muteLock) {
+        if (Build.VERSION.SDK_INT < 33) return "unavailable: handset suppression requires API 33"
         if (localMuted) return "already muted"
         if (tap == null) return "no tap open"
+        if (tap?.usedMethod?.startsWith("redirection") != true) return "unavailable for direct telephony audio"
         val before = audioManager.mode
         if (before != AudioManager.MODE_IN_CALL) return "skipped: mode=$before"
         audioManager.mode = MODE_CALL_REDIRECT
