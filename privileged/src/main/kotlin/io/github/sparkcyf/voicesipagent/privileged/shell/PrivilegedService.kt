@@ -118,9 +118,22 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
             repeat(entries) { step("companion-remove", "cmd", "telecom", "add-or-remove-call-companion-app", packageName, "0") }
         }
         if (!dozeAllowlisted(packageName)) step("deviceidle", "cmd", "deviceidle", "whitelist", "+$packageName")
-        for (perm in RUNTIME_PERMISSIONS) {
-            if (perm.endsWith("POST_NOTIFICATIONS") && Build.VERSION.SDK_INT < 33) continue
-            step("grant:${perm.substringAfterLast('.')}", "pm", "grant", packageName, perm)
+        // The runtime passes effective takeover, keeping grants enabled until deferred shutdown ends.
+        if (takeover) {
+            for (perm in PHONE_RUNTIME_PERMISSIONS) {
+                step("grant:${perm.substringAfterLast('.')}", "pm", "grant", packageName, perm)
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            // Dialer call/recovery notifications remain necessary with gateway takeover off.
+            val needsNotifications = takeover || asHelper {
+                runCatching { dialerPlatform.state().holder == appPackage }
+                    .onFailure { log.append("notification-role-check=fail(${it.message})\n") }
+                    .getOrDefault(false)
+            }
+            if (needsNotifications) {
+                step("grant:POST_NOTIFICATIONS", "pm", "grant", packageName, "android.permission.POST_NOTIFICATIONS")
+            }
         }
         Log.i(TAG, "setup:\n$log")
         return health(packageName).apply { putString("setup_log", log.toString()) }
@@ -246,11 +259,9 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
 
     companion object {
         private const val TAG = "VsaPrivileged"
-        private val RUNTIME_PERMISSIONS = listOf(
+        private val PHONE_RUNTIME_PERMISSIONS = listOf(
             "android.permission.CALL_PHONE",
             "android.permission.READ_PHONE_STATE",
-            "android.permission.READ_PHONE_NUMBERS",
-            "android.permission.POST_NOTIFICATIONS",
         )
     }
 }
