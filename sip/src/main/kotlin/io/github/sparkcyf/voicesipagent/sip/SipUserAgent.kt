@@ -32,7 +32,11 @@ class SipUserAgent(
     override val name: String = "sip"
 
     private val executor = ScheduledThreadPoolExecutor(1) { r -> Thread(r, "sip-ua").apply { isDaemon = true } }
-        .apply { removeOnCancelPolicy = true }
+        .apply {
+            removeOnCancelPolicy = true
+            executeExistingDelayedTasksAfterShutdownPolicy = false
+            continueExistingPeriodicTasksAfterShutdownPolicy = false
+        }
     private val random = SecureRandom()
     internal lateinit var transport: SipTransport
     private lateinit var serverAddr: InetSocketAddress

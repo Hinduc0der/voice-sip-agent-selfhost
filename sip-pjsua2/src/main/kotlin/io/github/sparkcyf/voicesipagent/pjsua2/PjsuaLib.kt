@@ -12,17 +12,13 @@ import org.pjsip.pjsua2.pjsip_transport_type_e
 import java.security.KeyStore
 import java.security.cert.X509Certificate
 import java.util.Base64
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ScheduledFuture
-import java.util.concurrent.ScheduledThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 /**
  * The process-wide pjsua2 library.
  *
- * pjsua is a per-process singleton that does not like being destroyed and recreated, so it is
- * created once and kept for the life of the process; endpoints only add and remove accounts.
+ * pjsua is a per-process singleton. Ordinary endpoint restarts reuse it; disabling the gateway
+ * destroys it on its own thread so native audio clocks and event polling also stop.
  * Everything that touches pjsua runs on the single "pjsua" thread. That thread also polls the SIP
  * ioqueue (threadCnt = 0) and runs pjsua2's pending jobs (mainThreadOnly), so all SIP callbacks
  * arrive on it too. The only other threads that enter Java are pjmedia's (the conference clock
@@ -30,61 +26,41 @@ import java.util.concurrent.TimeUnit
  */
 internal object PjsuaLib {
     private const val USER_AGENT = "voice-sip-agent/0.2 pjsua2"
+    private const val IDLE_POLL_MS = 100L
+    private const val ACTIVE_POLL_MS = 10L
     private val DIGITS = Regex("\\d{5,}")
 
-    private val queue = LinkedBlockingQueue<Runnable>()
-    private val timers = ScheduledThreadPoolExecutor(1) { r -> Thread(r, "pjsua-timer").apply { isDaemon = true } }
-        .apply { removeOnCancelPolicy = true }
-    @Volatile private var thread: Thread? = null
+    private val worker = PjsuaWorker(::init, ::poll, ::release) { log.warn("pjsua task failed", it) }
     @Volatile var log: PjsipLog = PjsipLog.Silent
 
     /** pjsip's own info-level (3) lines; errors and warnings (1-2) always pass. */
     @Volatile var verbose = false
 
     // pjsua thread only
-    lateinit var ep: Endpoint
-        private set
-    private lateinit var logWriter: LogWriter
+    private var endpoint: Endpoint? = null
+    val ep: Endpoint get() = endpoint ?: error("pjsua2 stopped")
+    private var logWriter: LogWriter? = null
     private val transports = HashMap<Pair<SipTransport, Int>, Int>()
 
-    val running: Boolean get() = thread != null
+    val running: Boolean get() = worker.running
 
     /** Loads and initialises the library on first use. Throws if that fails. */
     @Synchronized
     fun ensureStarted(log: PjsipLog) {
         this.log = log
-        if (thread != null) return
-        val ready = CountDownLatch(1)
-        var failure: Throwable? = null
-        val t = Thread({
-            try {
-                init()
-            } catch (e: Throwable) {
-                failure = e
-                return@Thread
-            } finally {
-                ready.countDown()
-            }
-            loop()
-        }, "pjsua").apply {
-            isDaemon = true
-            priority = Thread.MAX_PRIORITY - 1
-        }
-        t.start()
-        ready.await()
-        failure?.let { throw IllegalStateException("pjsua2 init failed: ${it.message}", it) }
-        thread = t
+        worker.start()
     }
 
-    fun post(task: () -> Unit) {
-        queue.add(Runnable(task))
-    }
+    fun post(task: () -> Unit) = worker.post(task)
 
     fun schedule(delayMs: Long, task: () -> Unit): ScheduledFuture<*> =
-        timers.schedule({ post(task) }, delayMs, TimeUnit.MILLISECONDS)
+        worker.schedule(delayMs, task)
 
     fun every(periodMs: Long, task: () -> Unit): ScheduledFuture<*> =
-        timers.scheduleWithFixedDelay({ post(task) }, periodMs, periodMs, TimeUnit.MILLISECONDS)
+        worker.every(periodMs, task)
+
+    @Synchronized
+    fun stop() = worker.stop()
 
     /** The local address may have changed: rebind, re-register and re-INVITE active calls. */
     fun handleIpChange() = post {
@@ -142,10 +118,17 @@ internal object PjsuaLib {
 
     fun redact(s: String): String = DIGITS.replace(s) { "**" + it.value.takeLast(2) }
 
+    private fun poll() {
+        // Port 0 is always present. Native sockets and timer deadlines can wake this wait early;
+        // app commands may wait up to 100 ms while no call media is attached.
+        val timeout = if (ep.mediaActivePorts() <= 1) IDLE_POLL_MS else ACTIVE_POLL_MS
+        ep.libHandleEvents(timeout)
+    }
+
     private fun init() {
         System.loadLibrary("c++_shared")
         System.loadLibrary("pjsua2")
-        ep = Endpoint()
+        endpoint = Endpoint()
         ep.libCreate()
         val cfg = EpConfig()
         cfg.uaConfig.apply {
@@ -220,17 +203,17 @@ internal object PjsuaLib {
         log.info("pjsua2 ${ep.libVersion().full} started")
     }
 
-    private fun loop() {
-        while (true) {
-            while (true) {
-                val task = queue.poll() ?: break
-                try {
-                    task.run()
-                } catch (t: Throwable) {
-                    log.warn("pjsua task failed", t)
+    private fun release() {
+        val previous = endpoint
+        try { previous?.libDestroy() } finally {
+            // Keep the Java log director alive until native destruction is complete.
+            try { previous?.delete() } finally {
+                endpoint = null
+                try { logWriter?.delete() } finally {
+                    logWriter = null
+                    transports.clear()
                 }
             }
-            ep.libHandleEvents(10)
         }
     }
 }

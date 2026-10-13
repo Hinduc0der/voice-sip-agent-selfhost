@@ -27,14 +27,21 @@ internal class DialerHandoff(private val gateway: String, private val store: Sto
     fun prepare(acquire: Boolean): Prepared {
         val state = backend.state()
         if (acquire && state.holder == gateway) return Prepared(result = DialerRoleResult(SUCCESS, "Already the default dialer.", state))
-        if (!acquire && state.holder != gateway) {
+        if (acquire) return prepareAcquisition(PreviousDialer(state.userId, state.holder))
+        if (state.holder != gateway) {
             return Prepared(result = finish(false, DialerRoleResult(CHANGED, "Default dialer has already changed; leaving that choice in place.", state)))
         }
-        if (acquire && !store.save(PreviousDialer(state.userId, state.holder))) {
-            return Prepared(result = DialerRoleResult(FAILED, "Could not save the previous dialer; no role change was attempted.", state))
-        }
         val previous = store.load()?.takeIf { it.userId == state.userId }?.packageName.orEmpty()
-        return Prepared(DialerChange(acquire, state.userId, state.holder, previous))
+        return Prepared(DialerChange(false, state.userId, state.holder, previous))
+    }
+
+    /** Capture the user's explicit request before a stopped helper reconnects. */
+    fun prepareAcquisition(previous: PreviousDialer): Prepared {
+        if (previous.packageName == gateway) return Prepared(result = DialerRoleResult(SUCCESS, "Already the default dialer."))
+        if (!store.save(previous)) {
+            return Prepared(result = DialerRoleResult(FAILED, "Could not save the previous dialer; no role change was attempted."))
+        }
+        return Prepared(DialerChange(true, previous.userId, previous.packageName, previous.packageName))
     }
 
     fun execute(change: DialerChange): DialerRoleResult {

@@ -154,6 +154,8 @@ for ABI in "${ABI_LIST[@]}"; do
   cp "$HERE/config_site.h" "$SRC/pjlib/include/pj/config_site.h"
   # Accept "*." wildcard server certificates (RFC 6125); stock pjsip rejects them per RFC 5922.
   patch -p1 -d "$SRC" < "$HERE/pjsip-tls-wildcard.patch"
+  # Remove for 2.18 or later if https://github.com/pjsip/pjproject/pull/5336 lands.
+  patch -p1 -d "$SRC" < "$HERE/pjsip-close-idle-device.patch"
   # Bulk byte[] <-> ByteVector copies; the stock binding is a List<Short> with one JNI call per byte.
   # Must precede %template(ByteVector), so it goes right after the and_string.i include.
   I="$SRC/pjsip-apps/src/swig/pjsua2.i"

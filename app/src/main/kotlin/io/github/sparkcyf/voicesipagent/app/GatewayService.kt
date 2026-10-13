@@ -6,10 +6,14 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.Build
+import android.telecom.TelecomManager
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -19,15 +23,27 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-/** Keeps the process (and so the SIP registration) alive, with a status notification. */
+/**
+ * Keeps the process and SIP registration alive while takeover is on, with a status notification.
+ * When takeover is off, keeps a reminder visible while this app still holds the dialer role.
+ */
 class GatewayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var statusJob: Job? = null
     private var foreground = false
+    private val roleReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            GatewayRuntime.get(this@GatewayService).refreshCallAccess()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
-        GatewayRuntime.get(this).start()
+        val runtime = GatewayRuntime.get(this)
+        runtime.start()
+        ContextCompat.registerReceiver(this, roleReceiver,
+            IntentFilter(TelecomManager.ACTION_DEFAULT_DIALER_CHANGED), ContextCompat.RECEIVER_EXPORTED)
+        runtime.refreshCallAccess()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -71,6 +87,7 @@ class GatewayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        unregisterReceiver(roleReceiver)
         scope.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
@@ -78,6 +95,7 @@ class GatewayService : Service() {
 
     private fun summary(h: HealthState): String = when {
         h.session != null -> "In call · ${h.session}"
+        !h.takeover && h.holdsDialer -> "Takeover off. Still your default phone app; change it in Settings."
         !h.takeover -> "Call takeover off"
         h.loopbackTest -> "Loopback test mode"
         !h.privilegedReady -> "Setup needed · Shizuku ${h.shizuku.name.lowercase()}"
@@ -93,6 +111,7 @@ class GatewayService : Service() {
             .setSmallIcon(R.drawable.ic_gateway)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(text))
             .setOngoing(true)
             .setContentIntent(open)
             .build()

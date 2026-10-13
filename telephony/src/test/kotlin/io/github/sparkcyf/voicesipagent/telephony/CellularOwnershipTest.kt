@@ -53,6 +53,8 @@ class CellularOwnershipTest {
     @Before fun setup() {
         doAnswer { mainTasks.add(it.getArgument(0)); true }.`when`(main).post(any(Runnable::class.java))
         doAnswer { delayedTasks.add(it.getArgument(0)); true }.`when`(main).postDelayed(any(Runnable::class.java), anyLong())
+        doAnswer { delayedTasks.add(it.getArgument(0)); true }.`when`(main)
+            .postDelayed(any(Runnable::class.java), any(), anyLong())
         doReturn(context).`when`(context).applicationContext
         doReturn(telecom).`when`(context).getSystemService(TelecomManager::class.java)
         doReturn(mock(TelephonyManager::class.java)).`when`(context).getSystemService(TelephonyManager::class.java)
@@ -135,6 +137,7 @@ class CellularOwnershipTest {
         active(); open()
         assertEquals(1, openCount)
         leg.hangup(HangupCause.NORMAL); drainMain()
+        verify(main).removeCallbacksAndMessages(leg)
         delayedTasks.removeFirst().run()
         assertTrue(audioTasks.isEmpty())
         assertEquals(1, openCount)

@@ -10,7 +10,9 @@ import io.github.sparkcyf.voicesipagent.voice.LegDirection
 import io.github.sparkcyf.voicesipagent.voice.LegState
 import io.github.sparkcyf.voicesipagent.voice.Party
 import java.util.ArrayDeque
-import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 
 /**
  * A Telecom call as a [io.github.sparkcyf.voicesipagent.voice.CallLeg]. Telecom methods run on the main thread.
@@ -102,9 +104,9 @@ class CellularLeg internal constructor(
                     if (!audio.isCurrent(ticket) || !endpoint.canTap(this)) return@post
                     if (state == LegState.CONNECTED && ++audioAttempt < 5) {
                         endpoint.log("cell $id audio open failed (${e.message}); retry $audioAttempt")
-                        main.postDelayed({
+                        later(300L * audioAttempt) {
                             if (audio.isCurrent(ticket) && endpoint.canTap(this)) openAudio(audio.begin())
-                        }, 300L * audioAttempt)
+                        }
                     } else if (state == LegState.CONNECTED) {
                         endpoint.log("cell $id audio unavailable: ${e.message}")
                         abortAudio("audio setup failed")
@@ -140,6 +142,7 @@ class CellularLeg internal constructor(
     }
 
     private fun stopMedia() {
+        main.removeCallbacksAndMessages(this)
         audio.invalidate()
         runCatching { publishMedia(null) }.onFailure { endpoint.log("cell $id media listener failed") }
         runCatching { endpoint.releaseMute(this) }.onFailure { endpoint.log("cell $id mute restore failed") }
@@ -230,17 +233,24 @@ class CellularLeg internal constructor(
         }
         dtmfPlaying = true
         c.playDtmfTone(next.first)
-        main.postDelayed({
+        later(next.second.toLong()) {
             if (!stopping && call === c) {
                 c.stopDtmfTone()
-                main.postDelayed(::playNextDtmf, DTMF_GAP_MS)
+                later(DTMF_GAP_MS, ::playNextDtmf)
             }
-        }, next.second.toLong())
+        }
+    }
+
+    // Keeps token-based scheduling in one place for a future backport below API 28.
+    private fun later(delay: Long, task: () -> Unit) {
+        main.postDelayed(task, this, delay)
     }
 
     companion object {
         private const val MIN_DTMF_MS = 100
         private const val DTMF_GAP_MS = 60L
-        internal val audioExecutor = Executors.newSingleThreadExecutor { r -> Thread(r, "cell-audio-open").apply { isDaemon = true } }
+        // Audio opens remain serialized, but no thread survives an idle/disabled gateway.
+        internal val audioExecutor = ThreadPoolExecutor(0, 1, 100, TimeUnit.MILLISECONDS,
+            LinkedBlockingQueue()) { task -> Thread(task, "cell-audio-open").apply { isDaemon = true } }
     }
 }

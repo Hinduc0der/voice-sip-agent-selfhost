@@ -45,7 +45,7 @@ class PjsipEndpoint(
     internal val calls = HashMap<Int, PjsipCall>()
     private var serverAddrs: Set<InetAddress> = emptySet()
     private var rtpCheck: ScheduledFuture<*>? = null
-    private var stopped = false
+    @Volatile private var stopped = false
     private var unregistered = false
 
     private val hostPort = if (config.port == config.transport.defaultPort) config.server else "${config.server}:${config.port}"
@@ -87,6 +87,7 @@ class PjsipEndpoint(
         if (!PjsuaLib.running) return
         val done = CountDownLatch(1)
         PjsuaLib.post {
+            try {
             stopped = true
             rtpCheck?.cancel(false)
             calls.values.toList().forEach { it.doHangup(HangupCause.NORMAL) }
@@ -99,13 +100,12 @@ class PjsipEndpoint(
                     while (!unregistered && System.currentTimeMillis() < deadline) PjsuaLib.ep.libHandleEvents(20)
                 }
                 // shutdown() detaches from pjsua; the Java wrapper must be freed explicitly.
-                acc.shutdown()
-                acc.delete()
+                try { acc.shutdown() } finally { acc.delete(); account = null }
             }
             account = null
             if (releaseTransport) PjsuaLib.closeTransport(config.transport, config.localPort)
             setStatus(EndpointStatus(false, "stopped"))
-            done.countDown()
+            } finally { done.countDown() }
         }
         done.await(timeoutMs, TimeUnit.MILLISECONDS)
     }
@@ -168,7 +168,7 @@ class PjsipEndpoint(
 
     override fun dial(target: String, caller: Party): CallLeg {
         val leg = PjsipCall(this, LegDirection.OUTBOUND, Party(target), target, "p${ids.getAndIncrement()}")
-        if (!PjsuaLib.running) {
+        if (stopped || !PjsuaLib.running) {
             leg.doHangup(HangupCause.INTERNAL_ERROR)
             return leg
         }
@@ -233,6 +233,9 @@ class PjsipEndpoint(
     }
 
     companion object {
+        /** All endpoints must be stopped before releasing the shared native library. */
+        fun stopLibrary() = PjsuaLib.stop()
+
         /** Passes pjsip's info-level log lines through (call/registration traces). Off by default. */
         fun setVerboseLogging(on: Boolean) {
             PjsuaLib.verbose = on

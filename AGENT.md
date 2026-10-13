@@ -102,10 +102,23 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   carry the caller number in `P-Asserted-Identity`; for inbound calls the cellular number to dial comes from the
   `X-VSA-Dial` header, falling back to the Request-URI user part. PCMU/PCMA + telephone-event(101) only.
 - **SIP (`:sip-pjsua2`)**: `PjsipEndpoint` implements `CallEndpoint` with the same trunk semantics as `:sip`.
-  - pjsua is a process singleton: `PjsuaLib` is initialised once and never destroyed; restarting the endpoint only
+  - pjsua is a process singleton: ordinary endpoint restarts reuse `PjsuaLib`; restarting the endpoint only
     adds/removes accounts, transports (keyed by type + port) are kept and reused. Every pjsua call and SIP callback
     runs on a single `pjsua` thread (`threadCnt=0` + `mainThreadOnly`, looping over a task queue and
-    `libHandleEvents`).
+    `libHandleEvents`). The SIP event wait is capped at 100 ms without call media and 10 ms with media;
+    sockets and native timer deadlines wake it earlier, while queued app controls can wait up to 100 ms.
+    The RTP/RTCP manager retains its own ioqueue and one worker (`medConfig.hasIoqueue=true`,
+    `threadCnt=1`, the PJSIP defaults). That worker uses a 10 ms maximum socket wait even without
+    calls; slower SIP polling does not remove its idle wakeups. CPU and battery costs are unmeasured.
+    Retain this separation so SIP callbacks and queued app commands cannot hold up RTP reception
+    and jitter-buffer filling. Sharing the SIP ioqueue with zero media workers is supported, but
+    stalls on the shared thread can cause audio gaps; compilation and unit tests do not establish
+    audio quality. A possible future optimization is a longer maximum wait in PJMEDIA's
+    `pjmedia/src/pjmedia/endpoint.c` `worker_proc`: ready sockets wake the wait early. This requires
+    a native rebuild and device validation of call startup, audio timing, and shutdown.
+    Takeover-off stops the endpoint, drains deferred wrapper deletions, and destroys
+    the native library on that thread. Its timers, event thread, sockets, and null-device clock stop;
+    switch-on creates a new library lifetime. Physical off/on cycling remains a device validation check.
   - **No Android sound-device backend is compiled in** — only the null sound device, so pjsua never touches
     AudioManager or the audio mode. Audio enters/leaves the conference bridge through `AudioMediaPort`
     (`ConfPort`, 16 kHz / 20 ms, no EC). Opus uses 16 kHz mono PCM (20 kbit/s target);
@@ -142,10 +155,20 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     rules without auditing generated JNI lookups and testing a release APK in both app and shell processes.
 - **Runtime (`:app`)**: `GatewayRuntime` singleton; every state-changing operation runs on the single-threaded
   `gateway-runtime` executor. It is started from `GatewayApp.onCreate` (Telecom may start the process just to bind
-  the InCallService). A health check runs every 60 s and re-runs setup while idle if takeover is enabled,
+  the InCallService). While takeover is enabled, a health check runs every 60 s and re-runs setup while idle if
   companion mode is selected, and call access is unavailable. The override alone does not gate readiness;
   health checks never request the dialer role.
   Settings live in SharedPreferences; the SIP password is sealed with a Keystore AES-GCM key.
+  Takeover-off cancels health/dialer polling, unregisters network monitoring, and removes
+  this app's Shizuku listeners and UserService after explicit handoff cleanup. Saved-off startup
+  starts none of those resources. The standard runtime executor releases its thread after one idle
+  second while off; SIP/bridge delayed work is cancelled on shutdown. The shared Shizuku server is
+  not stopped. While the app holds the default-dialer role, the foreground service keeps a reminder
+  visible even when takeover is off. Its passive dialer-change receiver updates or removes the
+  notification when the role changes. Shutdown attempts dialer restoration using the existing helper
+  connection, then releases it. Restoration that cannot complete exposes system default-app settings;
+  role actions while off use Android's selection UI. Failed or cancelled requests are cleared, and
+  no role retries run while off. Re-enable restores gateway background work.
   Explicit dialer handoff and takeover-switch actions use narrow Shizuku AIDL methods and `cmd role` for the owning app's
   Android user. `DialerHandoffStore` commits the previous dialer before acquisition, separately from
   SIP settings. Restore the saved dialer first, then try the system fallback; verify the actual holder.
@@ -165,6 +188,10 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   Telecom calls and the bridge session end (`takeoverOffPending`); enabling can also wait (`takeoverOnPending`).
   Keep dialer activity/service enabled while holding the role, including after failed restoration.
   Startup/setup/health checks never acquire or restore roles; only explicit actions initiate handoff.
+  Switch-on captures the owning user's current dialer through Telecom before the helper reconnects.
+  Pending acquisition runs only with takeover enabled and the helper connected; switching off, cancellation,
+  or a different holder prevents replay. Helper disconnections defer rebinding until Shizuku clears its
+  dead connection; each bind has a new generation to reject stale callbacks.
   API 31+ Automatic returns to companion access after restoring the role; explicit DIALER selection reacquires
   on each switch-on. Changing the selection or retention setting alone never mutates the role.
 - **The companion override is a plain list**: adding appends a duplicate, removing deletes one entry. `setup` must

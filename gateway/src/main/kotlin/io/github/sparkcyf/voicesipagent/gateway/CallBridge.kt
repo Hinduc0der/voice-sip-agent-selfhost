@@ -7,7 +7,7 @@ import io.github.sparkcyf.voicesipagent.voice.LegState
 import io.github.sparkcyf.voicesipagent.voice.MediaPort
 import io.github.sparkcyf.voicesipagent.voice.redactNumber
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -60,7 +60,11 @@ class CallBridge(
     private val log: (String) -> Unit = {},
 ) {
     private val executor: ScheduledExecutorService =
-        Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "call-bridge").apply { isDaemon = true } }
+        ScheduledThreadPoolExecutor(1) { r -> Thread(r, "call-bridge").apply { isDaemon = true } }.apply {
+            removeOnCancelPolicy = true
+            executeExistingDelayedTasksAfterShutdownPolicy = false
+            continueExistingPeriodicTasksAfterShutdownPolicy = false
+        }
     private val listeners = CopyOnWriteArrayList<BridgeListener>()
     private var nextId = 1
 

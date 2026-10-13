@@ -16,19 +16,15 @@ class GatewayServicePolicyTest {
         assertFalse(standby.copy(takeover = false).needsForegroundService)
     }
 
-    @Test fun pendingTakeoverOffKeepsServiceUntilCallCleanupEnds() {
-        val pending = HealthState(effectiveCallAccess = CallAccess.COMPANION,
-            takeover = true, takeoverOffPending = true, session = "gateway call")
-        assertTrue(pending.needsForegroundService)
-        assertFalse(pending.copy(takeover = false, takeoverOffPending = false, session = null).needsForegroundService)
-    }
-
     @Test fun dialerSelectionWithoutRoleDoesNotPersistButRoleAcquisitionDoes() {
         val selected = HealthState(effectiveCallAccess = CallAccess.DIALER, holdsDialer = false)
         assertFalse(selected.needsForegroundService)
         assertTrue(selected.copy(holdsDialer = true).needsForegroundService)
-        // Keep the recovery screen available for the actual default dialer even with takeover off.
-        assertTrue(selected.copy(holdsDialer = true, takeover = false).needsForegroundService)
+        val reminder = selected.copy(holdsDialer = true, takeover = false)
+        assertTrue(reminder.needsForegroundService)
+        assertTrue(reminder.copy(effectiveCallAccess =
+            CallAccess.effective(CallAccess.COMPANION, 34, reminder.holdsDialer)).needsForegroundService)
+        assertFalse(reminder.copy(holdsDialer = false).needsForegroundService)
     }
 
     @Test fun losingRoleKeepsOwnedCallCleanupButOtherCallsDoNotKeepServiceAlive() {
@@ -49,8 +45,10 @@ class GatewayServicePolicyTest {
             val dialer = companion.copy(effectiveCallAccess = CallAccess.DIALER, holdsDialer = false)
             GatewayService.sync(context, dialer)
             GatewayService.sync(context, dialer.copy(holdsDialer = true))
-            verify(context, times(2)).startForegroundService(any(Intent::class.java))
-            verify(context, times(2)).stopService(any(Intent::class.java))
+            GatewayService.sync(context, dialer.copy(holdsDialer = true, takeover = false))
+            GatewayService.sync(context, dialer.copy(holdsDialer = false, takeover = false))
+            verify(context, times(3)).startForegroundService(any(Intent::class.java))
+            verify(context, times(3)).stopService(any(Intent::class.java))
         }
     }
 }

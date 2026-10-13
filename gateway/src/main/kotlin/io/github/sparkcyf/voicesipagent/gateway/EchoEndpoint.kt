@@ -27,9 +27,10 @@ class EchoEndpoint(
     private val answerDelayMs: Long = 1000,
     private val echoDelayMs: Int = 200,
     private val format: PcmFormat = PcmFormat.NARROWBAND,
-) : CallEndpoint {
+) : CallEndpoint, AutoCloseable {
     override val name = "echo"
-    override val status = EndpointStatus(true, "echo test")
+    @Volatile private var closed = false
+    override val status get() = EndpointStatus(!closed, if (closed) "stopped" else "echo test")
     private val timer = Timer("echo-endpoint", true)
     private val ids = AtomicInteger(1)
 
@@ -37,11 +38,21 @@ class EchoEndpoint(
     override fun addStatusListener(listener: EndpointStatusListener) {}
     override fun removeStatusListener(listener: EndpointStatusListener) {}
 
+    @Synchronized
     override fun dial(target: String, caller: Party): CallLeg {
         val leg = EchoLeg("e${ids.getAndIncrement()}", target, echoDelayMs / VoiceFormat.FRAME_MS, format)
+        if (closed) { leg.hangup(HangupCause.UNAVAILABLE); return leg }
         leg.proceed()
-        timer.schedule(answerDelayMs) { leg.connect() }
+        timer.schedule(answerDelayMs) {
+            synchronized(this@EchoEndpoint) { if (!closed) leg.connect() }
+        }
         return leg
+    }
+
+    @Synchronized
+    override fun close() {
+        closed = true
+        timer.cancel()
     }
 
     private class EchoLeg(id: String, target: String, delayFrames: Int, format: PcmFormat) :

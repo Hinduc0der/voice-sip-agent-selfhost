@@ -3,11 +3,13 @@ package io.github.sparkcyf.voicesipagent.app
 import android.app.KeyguardManager
 import android.app.role.RoleManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.provider.Settings
 import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
+import rikka.shizuku.Shizuku
 
 /** Role acquisition is confined to explicit UI actions. */
 abstract class DialerRoleActivity : ComponentActivity() {
@@ -27,7 +29,11 @@ abstract class DialerRoleActivity : ComponentActivity() {
         val rt = GatewayRuntime.get(this)
         val role = getSystemService(RoleManager::class.java)
         val held = role.isRoleHeld(RoleManager.ROLE_DIALER)
-        val needsSystemRequest = on && !held && rt.shizuku.service == null &&
+        // Off stops our helper, but an authorized Shizuku server can restart it.
+        val helperAvailable = rt.shizuku.service != null || runCatching {
+            Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+        }.getOrDefault(false)
+        val needsSystemRequest = on && !held && !helperAvailable &&
             CallAccess.effective(rt.settings.callAccess, Build.VERSION.SDK_INT, held) == CallAccess.DIALER
         rt.setTakeover(on)
         if (needsSystemRequest) requestDialer()
@@ -39,7 +45,8 @@ abstract class DialerRoleActivity : ComponentActivity() {
             when {
                 !role.isRoleAvailable(RoleManager.ROLE_DIALER) -> message("Default dialer selection is unavailable on this device.")
                 role.isRoleHeld(RoleManager.ROLE_DIALER) -> GatewayRuntime.get(this).refreshCallAccess()
-                GatewayRuntime.get(this).shizuku.service != null -> GatewayRuntime.get(this).changeDefaultDialer(true)
+                GatewayRuntime.get(this).settings.takeover && GatewayRuntime.get(this).shizuku.service != null ->
+                    GatewayRuntime.get(this).changeDefaultDialer(true)
                 else -> {
                     val rt = GatewayRuntime.get(this)
                     rt.cancelDialerChange()
@@ -52,7 +59,7 @@ abstract class DialerRoleActivity : ComponentActivity() {
 
     protected fun switchDialer() = afterUnlock {
         val rt = GatewayRuntime.get(this)
-        if (rt.shizuku.service != null) rt.changeDefaultDialer(false) else chooseDialerInSettings()
+        if (rt.settings.takeover && rt.shizuku.service != null) rt.changeDefaultDialer(false) else chooseDialerInSettings()
     }
 
     protected fun cancelDialerChange() = afterUnlock { GatewayRuntime.get(this).cancelDialerChange() }
