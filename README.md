@@ -72,18 +72,32 @@ Emergency numbers are always refused and are never dialed through the gateway.
 3. Open the app, tap **Grant Shizuku** and allow access. The app then runs its setup automatically (appops,
    Telecom companion override where applicable, Doze allowlist, runtime permissions) and repeats it after upgrades.
    A health check runs every 60 s and retries setup while idle if takeover is enabled and companion call access is unavailable.
-   On Android 11, use the visible **Select as default dialer** setup action to grant call access.
-   The app never requests this role automatically. On newer versions, Automatic call access keeps companion
+   On Android 11, turn **Take over calls** on (or tap **Enable takeover**) to grant default-dialer call access.
+   With Shizuku connected, this saves your previous dialer and changes the role directly, without the
+   system role dialog. Changes wait for current calls to end and can be cancelled while waiting.
+   Without Shizuku, the explicit switch-on action opens Android's role-selection dialog.
+   Startup, setup and health checks never acquire the role. On newer versions, Automatic call access keeps companion
    integration unless the app already holds the dialer role; Advanced settings can select either mode explicitly.
 4. Fill in **Settings** (PBX host/port, transport, SRTP, user, password, …) and tap **Save & apply**.
-5. **Take over calls** is the master switch. Switching it off waits for current calls to end, then stops bridging
-   and companion integration. If this app is the default dialer, its recovery screen stays available;
-   use **Switch dialer** to return normal call handling to your usual dialer.
+5. **Take over calls** is the master switch. In default-dialer mode, switching it on also saves your previous
+   dialer and acquires the role. Switching off waits for current calls and bridge cleanup, then stops bridging
+   and companion integration and restores your previous dialer through Shizuku.
+   If that dialer is unavailable, the app attempts the system fallback. **Choose dialer in Settings**
+   remains available in Advanced settings and appears on restoration failure for manual recovery.
+   **Keep default-dialer role when gateway is off** in Advanced disables automatic restoration on the next
+   switch-off. Independent **Become default dialer** and **Restore previous dialer** actions are also in Advanced.
+   Role changes made in Settings leave takeover unchanged; a pending
+   request will not replace a different dialer selected while it was waiting. The saved return dialer
+   survives process restarts, but pending role changes are never replayed automatically after restart.
+   Toggling takeover again cancels the pending handoff; existing calls keep their bridge.
+   On Android 12+, Automatic returns to companion mode after restoration. Select **Default dialer** in Advanced
+   to acquire the role on each switch-on.
    In companion mode, switching takeover off also stops the foreground service and removes its notification;
    idle gateway standby keeps both running. In dialer mode, the service runs while this app is the default
    dialer. Owned calls finish cleanup before the service stops.
 
-Advanced settings are collapsed by default. They contain call-access and cellular-audio choices, automatic
+Advanced settings are collapsed by default. They contain call-access and cellular-audio choices, dialer-role
+controls and retention, automatic
 handset suppression when supported, loopback, debug logging, and diagnostics. The call log remains visible
 outside Advanced. Direct telephony audio skips the modern redirection helpers and uses voice-call stream mute for handset output,
 including on API 30–32; supported redirection taps retain mode-based suppression. The helper restores its

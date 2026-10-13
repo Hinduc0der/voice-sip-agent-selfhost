@@ -22,6 +22,7 @@ import io.github.sparkcyf.voicesipagent.gateway.GatewayConfig
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
 import io.github.sparkcyf.voicesipagent.privileged.AudioMethod
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
+import io.github.sparkcyf.voicesipagent.privileged.DialerRoleResult
 import io.github.sparkcyf.voicesipagent.privileged.CallAccessRequirements
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
 import io.github.sparkcyf.voicesipagent.pjsua2.PjsipConfig
@@ -47,6 +48,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ScheduledFuture
 
 data class HealthState(
     val shizuku: ShizukuConnector.State = ShizukuConnector.State.SHIZUKU_NOT_RUNNING,
@@ -58,6 +60,7 @@ data class HealthState(
     val takeover: Boolean = true,
     /** Takeover was switched off during a call; it takes effect when that call ends. */
     val takeoverOffPending: Boolean = false,
+    val takeoverOnPending: Boolean = false,
     val inCallServiceBound: Boolean = false,
     val loopbackTest: Boolean = false,
     val session: String? = null,
@@ -71,6 +74,10 @@ data class HealthState(
     val readinessDetail: String = "Checking gateway setup",
     val calls: CallSnapshot = CallSnapshot(),
     val settingsPending: Boolean = false,
+    val dialerChangePending: Boolean = false,
+    val dialerChangeRunning: Boolean = false,
+    val dialerChangeFailed: Boolean = false,
+    val dialerChangeAcquire: Boolean = false,
 ) {
     val privilegedReady: Boolean
         get() = callAccessReady && audioReady && shizuku == ShizukuConnector.State.CONNECTED
@@ -88,8 +95,8 @@ data class HealthState(
  * Owns every long-lived component and wires them together:
  * Shizuku -> privileged setup -> cellular endpoint readiness; settings -> SIP UA; both -> CallBridge.
  * The bridge's B side is the SIP UA normally, or [EchoEndpoint] in loopback-test mode.
- * With takeover off, the InCallService is disabled, the companion override withdrawn and SIP
- * unregistered, so calls behave as if the app were not installed.
+ * Switching takeover off withdraws companion access and SIP, then restores the previous dialer
+ * unless the user chose to retain the role. Role-qualified recovery components stay enabled.
  */
 class GatewayRuntime private constructor(context: Context) {
     private val app = context.applicationContext
@@ -107,6 +114,8 @@ class GatewayRuntime private constructor(context: Context) {
             effectiveCallAccess = CallAccess.effective(settings.callAccess, Build.VERSION.SDK_INT, holds))
     })
     val health: StateFlow<HealthState> = _health
+    private val _dialerMessage = MutableStateFlow("")
+    val dialerMessage: StateFlow<String> = _dialerMessage
 
     val shizuku = ShizukuConnector(app) { AppLog.i(it) }
     private fun audioFormat() = if (settings.sipStack == SipStack.PJSUA2)
@@ -125,6 +134,35 @@ class GatewayRuntime private constructor(context: Context) {
     private var loopbackPending: Boolean? = null
     private var setupPending = false
     private var foregroundRequested: Boolean? = null
+    private var pendingDialerChange: DialerChange? = null
+    private var dialerRetry: ScheduledFuture<*>? = null
+    private val dialerHandoffStore = DialerHandoffStore(app)
+    private val dialerHandoff = DialerHandoff(app.packageName, dialerHandoffStore, object : DialerHandoff.Backend {
+        private fun service() = shizuku.service ?: error("Shizuku not connected. Use system dialer selection.")
+        override fun state() = DialerRoleResult.fromBundle(service().dialerState()).let {
+            it.state ?: error(it.message.ifEmpty { "Could not read the default dialer." })
+        }
+        override fun acquire(expectedHolder: String) = DialerRoleResult.fromBundle(service().becomeDefaultDialer(expectedHolder))
+        override fun restore(previousHolder: String) = DialerRoleResult.fromBundle(service().restoreDefaultDialer(previousHolder))
+    })
+    private val takeoverControl = TakeoverControl(object : TakeoverControl.Host {
+        override val enabled get() = _health.value.takeover
+        override val active get() = hasActiveWork()
+        override val needsDialer get() = _health.value.effectiveCallAccess == CallAccess.DIALER
+        override val holdsDialer get() = _health.value.holdsDialer
+        override val keepDialer get() = settings.keepDefaultDialer
+        override fun saveEnabled(on: Boolean) {
+            if (settings.takeover != on) {
+                settingsStore.save(settings.copy(takeover = on).also { _settings.value = it })
+            }
+        }
+        override fun cancelDialerChange() = clearDialerChange()
+        override fun prepareDialerChange(acquire: Boolean) = prepareDialerChangeRequest(acquire)
+        override fun showPending(on: Boolean?) {
+            _health.update { it.copy(takeoverOffPending = on == false, takeoverOnPending = on == true) }
+        }
+        override fun applyEnabled() = applyTakeover()
+    })
 
     private val sipLog = object : SipLog {
         override fun info(msg: String) = AppLog.i("sip: $msg")
@@ -272,14 +310,19 @@ class GatewayRuntime private constructor(context: Context) {
             else -> p?.get(HealthKeys.DIRECT_AUDIO) == true || p?.get(HealthKeys.REDIRECT_AUDIO) == true
         }
         val detail = when {
-            !h.takeover -> if (h.holdsDialer) "Gateway off; switch dialer to handle calls normally" else "Gateway off"
+            h.dialerChangeRunning -> "Changing the default dialer"
+            h.takeoverOnPending -> "Enabling gateway after current calls end"
+            h.takeoverOffPending -> "Turning gateway off after current calls end"
+            h.dialerChangePending -> if (h.dialerChangeAcquire)
+                "Waiting to become the default dialer" else "Waiting to restore the previous dialer"
+            !h.takeover -> if (h.holdsDialer) "Gateway off; this app still holds the dialer role" else "Gateway off"
             !access -> requirements.problem!!
             h.shizuku != ShizukuConnector.State.CONNECTED -> "Shizuku not connected"
             !audio -> "Selected call audio unavailable: ${h.privilegedDetail}"
             !h.loopbackTest && !h.sip.ready -> "SIP unavailable: ${h.sip.detail}"
             else -> "Gateway ready"
         }
-        val ready = h.takeover && access && audio && h.shizuku == ShizukuConnector.State.CONNECTED &&
+        val ready = !h.dialerChangeRunning && h.takeover && access && audio && h.shizuku == ShizukuConnector.State.CONNECTED &&
             (h.loopbackTest || h.sip.ready)
         _health.update { it.copy(callAccessReady = access, audioReady = audio, cellularReady = ready, readinessDetail = detail) }
         cellular.setReadiness(ready, detail)
@@ -292,7 +335,89 @@ class GatewayRuntime private constructor(context: Context) {
         if (GatewayService.sync(app, h)) foregroundRequested = h.needsForegroundService
     }
 
-    private fun hasActiveWork() = cellular.hasCalls || _health.value.session != null
+    private fun hasActiveWork() = cellular.hasCalls || bridge?.session != null || _health.value.session != null
+
+    fun showDialerMessage(message: String) { _dialerMessage.value = message }
+
+    /** Called only from an explicit, unlocked UI action. */
+    fun changeDefaultDialer(acquire: Boolean) = worker.execute {
+        clearDialerChange()
+        prepareDialerChangeRequest(acquire)
+        attemptDialerChange()
+    }
+
+    private fun clearDialerChange() {
+        dialerRetry?.cancel(false)
+        dialerRetry = null
+        pendingDialerChange = null
+        _health.update { it.copy(dialerChangePending = false, dialerChangeFailed = false, dialerChangeAcquire = false) }
+        _dialerMessage.value = ""
+    }
+
+    private fun prepareDialerChangeRequest(acquire: Boolean) {
+        _health.update { it.copy(dialerChangeAcquire = acquire) }
+        try {
+            val prepared = dialerHandoff.prepare(acquire)
+            pendingDialerChange = prepared.change
+            if (prepared.result != null) {
+                _dialerMessage.value = prepared.result.message
+                _health.update { it.copy(dialerChangeFailed = prepared.result.status == DialerRoleResult.FAILED) }
+                refreshCallAccess()
+            }
+        } catch (e: Exception) {
+            _health.update { it.copy(dialerChangeFailed = true) }
+            _dialerMessage.value = "Could not prepare the dialer change: ${e.message}. Use system default-app settings."
+        }
+    }
+
+    private fun attemptDialerChange() {
+        val change = pendingDialerChange ?: return
+        dialerRetry?.cancel(false)
+        dialerRetry = null
+        if (hasActiveWork()) { deferDialerChange(); return }
+        takeoverControl.applyIfIdle()
+        _health.update { it.copy(dialerChangeRunning = true, dialerChangePending = false) }
+        val result = try {
+            updateReadiness()
+            dialerHandoff.execute(change)
+        } catch (e: Exception) {
+            DialerRoleResult(DialerRoleResult.FAILED, "Dialer change failed: ${e.message}. Use system default-app settings.")
+        } finally {
+            _health.update { it.copy(dialerChangeRunning = false) }
+        }
+        if (result.deferred) deferDialerChange() else {
+            pendingDialerChange = null
+            _health.update { it.copy(dialerChangePending = false, dialerChangeFailed = result.status == DialerRoleResult.FAILED) }
+            _dialerMessage.value = result.message
+            AppLog.i("dialer change: ${result.status} ${result.message}")
+            refreshCallAccess()
+        }
+        updateReadiness()
+    }
+
+    private fun deferDialerChange() {
+        _health.update { it.copy(dialerChangePending = true) }
+        _dialerMessage.value = "Waiting for current calls to end. You can cancel the dialer change."
+        // Before acquisition our InCallService may not see the other dialer's calls. The helper
+        // queries Telecom, including self-managed calls, on each retry and before each command.
+        dialerRetry = worker.schedule({ dialerRetry = null; attemptDialerChange() }, 1, TimeUnit.SECONDS)
+    }
+
+    fun cancelDialerChange() = worker.execute {
+        val wasPending = pendingDialerChange != null
+        clearDialerChange()
+        if (wasPending) _dialerMessage.value = "Dialer change cancelled."
+    }
+
+    /** Public role-dialog fallback still saves a return destination before Android can kill us. */
+    fun rememberDialerForSystemRequest(): Boolean {
+        val previous = app.getSystemService(TelecomManager::class.java).defaultDialerPackage
+            ?: return false.also { showDialerMessage("Could not read the previous dialer. Use system default-app settings.") }
+        if (previous == app.packageName) return true
+        val saved = dialerHandoffStore.save(PreviousDialer(android.os.Process.myUid() / 100_000, previous))
+        if (!saved) showDialerMessage("Could not save the previous dialer; no role change was attempted.")
+        return saved
+    }
 
     private fun sipStatus(endpoint: CallEndpoint, status: EndpointStatus) = worker.execute {
         if (sip !== endpoint) return@execute
@@ -475,7 +600,8 @@ class GatewayRuntime private constructor(context: Context) {
         _settings.value = new
         AppLog.i("settings saved ($new)")
         val platformOnly = old.copy(audioMethod = new.audioMethod, callAccess = new.callAccess,
-            muteEarpiece = new.muteEarpiece, sipDebugLog = new.sipDebugLog) == new
+            muteEarpiece = new.muteEarpiece, sipDebugLog = new.sipDebugLog,
+            keepDefaultDialer = new.keepDefaultDialer) == new
         PjsipEndpoint.setVerboseLogging(new.sipDebugLog)
         if (!platformOnly) { startSip(); rebuildBridge() }
         configureCallAccess()
@@ -496,29 +622,30 @@ class GatewayRuntime private constructor(context: Context) {
         AppLog.i("earpiece mute ${if (on) "on" else "off"} (from next call)")
     }
 
+    /** Changes the next switch-off, without touching the current call or any queued handoff. */
+    fun setKeepDefaultDialer(on: Boolean) = worker.execute {
+        settingsStore.save(settings.copy(keepDefaultDialer = on).also { _settings.value = it })
+        pendingSettings = pendingSettings?.copy(keepDefaultDialer = on)
+    }
+
     /** The master switch. Switching off mid-call waits for that call to end. */
     fun setTakeover(on: Boolean) = worker.execute {
-        if (settings.takeover != on) {
-            settingsStore.save(settings.copy(takeover = on).also { _settings.value = it })
-        }
-        if (!on && hasActiveWork()) {
-            _health.update { it.copy(takeoverOffPending = true) }
-            AppLog.i("call takeover OFF requested; takes effect after the current call")
-            return@execute
-        }
-        applyTakeover()
+        refreshRoleState()
+        takeoverControl.request(on)
+        attemptDialerChange()
+        updateReadiness()
     }
 
     private fun applyTakeover() {
         val on = settings.takeover
-        _health.update { it.copy(takeover = on, takeoverOffPending = false) }
+        _health.update { it.copy(takeover = on, takeoverOffPending = false, takeoverOnPending = false) }
         configureCallAccess()
         startSip()
         rebuildBridge()
         // Withdraws or restores the Telecom companion override.
         runSetup()
         updateReadiness()
-        AppLog.i(if (on) "call takeover ON" else "call takeover OFF: all calls are left to the phone")
+        AppLog.i(if (on) "call takeover ON" else "call takeover OFF")
     }
 
     fun setLoopbackTest(on: Boolean) = worker.execute {
@@ -539,6 +666,8 @@ class GatewayRuntime private constructor(context: Context) {
 
     private fun applyDeferredChanges() {
         if (hasActiveWork()) return
+        takeoverControl.applyIfIdle()
+        if (pendingDialerChange != null) attemptDialerChange()
         val queued = pendingSettings
         pendingSettings = null
         val restart = restartPending
@@ -546,7 +675,6 @@ class GatewayRuntime private constructor(context: Context) {
         val loopback = loopbackPending
         loopbackPending = null
         _health.update { it.copy(settingsPending = false) }
-        if (_health.value.takeoverOffPending) applyTakeover()
         if (queued != null) applySettings(queued.copy(takeover = settings.takeover))
         if (loopback != null) setLoopbackTest(loopback)
         if (restart) restartSip()
@@ -559,7 +687,8 @@ class GatewayRuntime private constructor(context: Context) {
     fun statusReport(): String {
         val h = _health.value
         return buildString {
-            appendLine("takeover=${h.takeover} pendingOff=${h.takeoverOffPending} muteEarpiece=${settings.muteEarpiece}")
+            appendLine("takeover=${h.takeover} pendingOff=${h.takeoverOffPending} pendingOn=${h.takeoverOnPending} " +
+                "keepDefaultDialer=${settings.keepDefaultDialer} muteEarpiece=${settings.muteEarpiece}")
             appendLine("shizuku=${h.shizuku} (${h.shizukuDetail})")
             appendLine("privileged=${h.privileged} ${h.privilegedDetail}")
             appendLine("sip=${h.sip.detail} ready=${h.sip.ready} stack=${settings.sipStack.id} " +
@@ -568,6 +697,7 @@ class GatewayRuntime private constructor(context: Context) {
                 "service=${CellularEndpoint.boundServiceDescription ?: "none"}")
             appendLine("sdk=${Build.VERSION.SDK_INT} callAccess=${settings.callAccess} effective=${h.effectiveCallAccess} " +
                 "defaultDialer=${h.holdsDialer} audioMethod=${settings.audioMethod} audioReady=${h.audioReady}")
+            appendLine("dialerChangePending=${h.dialerChangePending} running=${h.dialerChangeRunning} ${_dialerMessage.value}")
             appendLine("calls=${h.calls.summary} settingsPending=${h.settingsPending}")
             appendLine("loopback=${h.loopbackTest} session=${h.session}")
             shizuku.service?.let { appendLine("tap=${runCatching { it.audioStats() }.getOrDefault("?")}") }

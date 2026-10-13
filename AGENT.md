@@ -146,12 +146,27 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   companion mode is selected, and call access is unavailable. The override alone does not gate readiness;
   health checks never request the dialer role.
   Settings live in SharedPreferences; the SIP password is sealed with a Keystore AES-GCM key.
+  Explicit dialer handoff and takeover-switch actions use narrow Shizuku AIDL methods and `cmd role` for the owning app's
+  Android user. `DialerHandoffStore` commits the previous dialer before acquisition, separately from
+  SIP settings. Restore the saved dialer first, then try the system fallback; verify the actual holder.
+  Runtime defers handoffs for bridge/owned calls and the helper checks Telecom for all ongoing calls,
+  including calls invisible to our InCallService before acquisition. Pending requests retain the
+  expected holder and can be cancelled; never replay them on startup or reclaim the role in setup.
+  Keep system role selection/settings available when Shizuku is unavailable or a handoff fails.
 
 ### Takeover switch and handset muting
 
-- **takeover=false**: disables companion integration and unregisters SIP. When holding the default-dialer role,
-  keep the dialer activity/service enabled for recovery and offer switching to the usual dialer. Turning off
-  during a call takes effect when current Telecom calls and the bridge session end (`takeoverOffPending`).
+- **Takeover is the primary control**: an explicit switch-on acquires the role when effective call access is
+  default dialer. Switch-off disables companion integration and unregisters SIP before restoring the saved
+  dialer, unless `keepDefaultDialer` is enabled. Independent role controls and the retention option live in
+  Advanced; failures expose recovery actions. External role changes never change the takeover setting.
+  `TakeoverControl` captures handoff intent before waiting for calls, preserves an active bridge during rapid
+  toggles, and applies gateway shutdown before restoration. Turning off during a call takes effect when current
+  Telecom calls and the bridge session end (`takeoverOffPending`); enabling can also wait (`takeoverOnPending`).
+  Keep dialer activity/service enabled while holding the role, including after failed restoration.
+  Startup/setup/health checks never acquire or restore roles; only explicit actions initiate handoff.
+  API 31+ Automatic returns to companion access after restoring the role; explicit DIALER selection reacquires
+  on each switch-on. Changing the selection or retention setting alone never mutates the role.
 - **The companion override is a plain list**: adding appends a duplicate, removing deletes one entry. `setup` must
   count the existing entries before adding or removing them one by one.
 - **Earpiece mute**: supported redirection taps switch `IN_CALL(2)` to `MODE_CALL_REDIRECT(5)`, tearing down

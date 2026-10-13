@@ -4,34 +4,64 @@ import android.app.KeyguardManager
 import android.app.role.RoleManager
 import android.content.Intent
 import android.provider.Settings
+import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import kotlinx.coroutines.flow.MutableStateFlow
+import io.github.sparkcyf.voicesipagent.privileged.CallAccess
 
 /** Role acquisition is confined to explicit UI actions. */
 abstract class DialerRoleActivity : ComponentActivity() {
-    protected val roleMessage = MutableStateFlow("")
+    protected val roleMessage get() = GatewayRuntime.get(this).dialerMessage
+    private fun message(value: String) = GatewayRuntime.get(this).showDialerMessage(value)
     private val roleRequest = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        roleMessage.value = if (result.resultCode == RESULT_OK) "" else "Default dialer selection was cancelled or declined."
+        val held = getSystemService(RoleManager::class.java).isRoleHeld(RoleManager.ROLE_DIALER)
+        message(when {
+            held -> "This app is now the default dialer."
+            result.resultCode == RESULT_OK -> "Android did not select this app as default dialer. Use system default-app settings."
+            else -> "Default dialer selection was cancelled or declined."
+        })
         GatewayRuntime.get(this).refreshCallAccess()
+    }
+
+    protected fun setTakeoverFromUi(on: Boolean) = afterUnlock {
+        val rt = GatewayRuntime.get(this)
+        val role = getSystemService(RoleManager::class.java)
+        val held = role.isRoleHeld(RoleManager.ROLE_DIALER)
+        val needsSystemRequest = on && !held && rt.shizuku.service == null &&
+            CallAccess.effective(rt.settings.callAccess, Build.VERSION.SDK_INT, held) == CallAccess.DIALER
+        rt.setTakeover(on)
+        if (needsSystemRequest) requestDialer()
     }
 
     protected fun requestDialer() {
         afterUnlock {
             val role = getSystemService(RoleManager::class.java)
             when {
-                !role.isRoleAvailable(RoleManager.ROLE_DIALER) -> roleMessage.value = "Default dialer selection is unavailable on this device."
+                !role.isRoleAvailable(RoleManager.ROLE_DIALER) -> message("Default dialer selection is unavailable on this device.")
                 role.isRoleHeld(RoleManager.ROLE_DIALER) -> GatewayRuntime.get(this).refreshCallAccess()
-                else -> runCatching { roleRequest.launch(role.createRequestRoleIntent(RoleManager.ROLE_DIALER)) }
-                    .onFailure { roleMessage.value = "Could not open default dialer selection. Use system default-app settings." }
+                GatewayRuntime.get(this).shizuku.service != null -> GatewayRuntime.get(this).changeDefaultDialer(true)
+                else -> {
+                    val rt = GatewayRuntime.get(this)
+                    rt.cancelDialerChange()
+                    if (rt.rememberDialerForSystemRequest()) runCatching { roleRequest.launch(role.createRequestRoleIntent(RoleManager.ROLE_DIALER)) }
+                        .onFailure { message("Could not open default dialer selection. Use system default-app settings.") }
+                }
             }
         }
     }
 
     protected fun switchDialer() = afterUnlock {
+        val rt = GatewayRuntime.get(this)
+        if (rt.shizuku.service != null) rt.changeDefaultDialer(false) else chooseDialerInSettings()
+    }
+
+    protected fun cancelDialerChange() = afterUnlock { GatewayRuntime.get(this).cancelDialerChange() }
+
+    protected fun chooseDialerInSettings() = afterUnlock {
+        GatewayRuntime.get(this).cancelDialerChange()
         val opened = runCatching { startActivity(Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)) }.isSuccess
         if (!opened && runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }.isFailure) {
-            roleMessage.value = "Open system Settings, then Default apps, and select your usual phone app."
+            message("Open system Settings, then Default apps, and select your usual phone app.")
         }
     }
 
@@ -44,8 +74,8 @@ abstract class DialerRoleActivity : ComponentActivity() {
         if (!keyguard.isKeyguardLocked) { action(); return }
         keyguard.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
             override fun onDismissSucceeded() = action()
-            override fun onDismissCancelled() { roleMessage.value = "Unlock the phone to continue." }
-            override fun onDismissError() { roleMessage.value = "Unlock the phone to continue." }
+            override fun onDismissCancelled() { message("Unlock the phone to continue.") }
+            override fun onDismissError() { message("Unlock the phone to continue.") }
         })
     }
 

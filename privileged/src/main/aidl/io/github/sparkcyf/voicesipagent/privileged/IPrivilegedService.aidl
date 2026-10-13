@@ -45,4 +45,13 @@ interface IPrivilegedService {
 
     /** Selected call access: 0 automatic, 1 companion, 2 default dialer. Never requests a role. */
     Bundle setupCallAccess(String packageName, boolean takeover, int callAccess) = 8;
+
+    /** Observed dialer holder and call state for the owning app's Android user. */
+    Bundle dialerState() = 9;
+
+    /** Explicit acquisition; refuses if the holder changed or Telecom has a call. */
+    Bundle becomeDefaultDialer(String expectedHolder) = 10;
+
+    /** Explicit restoration; only changes the role while this app still holds it. */
+    Bundle restoreDefaultDialer(String previousHolder) = 11;
 }

@@ -62,14 +62,16 @@ class MainActivity : DialerRoleActivity() {
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 val message by roleMessage.collectAsState()
-                Scaffold { pad -> Screen(runtime, Modifier.padding(pad), ::requestDialer, ::switchDialer, message) }
+                Scaffold { pad -> Screen(runtime, Modifier.padding(pad), ::requestDialer, ::switchDialer,
+                    ::chooseDialerInSettings, ::cancelDialerChange, ::setTakeoverFromUi, message) }
             }
         }
     }
 }
 
 @Composable
-private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit, roleMessage: String) {
+private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> Unit, switchDialer: () -> Unit,
+    chooseDialer: () -> Unit, cancelDialer: () -> Unit, setTakeover: (Boolean) -> Unit, roleMessage: String) {
     val h by rt.health.collectAsState()
     val log by AppLog.tail.collectAsState()
     Column(
@@ -79,13 +81,21 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
         Text("Voice SIP Agent", style = MaterialTheme.typography.headlineSmall)
         val cur by rt.settingsFlow.collectAsState()
         Section("Takeover") {
-            Toggle("Take over calls", cur.takeover, { rt.setTakeover(it) }) {
+            Toggle("Take over calls", cur.takeover, setTakeover) {
                 when {
                     h.takeoverOffPending -> "Turning off after the current call"
-                    cur.takeover -> "Calls are bridged to the PBX"
-                    h.holdsDialer -> "Gateway off; switch dialer to handle calls normally"
+                    h.takeoverOnPending -> "Turning on after current calls end"
+                    h.dialerChangeRunning -> "Changing the default dialer"
+                    h.dialerChangePending -> if (h.dialerChangeAcquire) "Waiting to become the default dialer" else "Waiting to restore your previous dialer"
+                    cur.takeover -> if (h.cellularReady) "Calls are bridged to the PBX" else h.readinessDetail
+                    h.holdsDialer && cur.keepDefaultDialer -> "Gateway off; keeping the default-dialer role"
+                    h.holdsDialer -> "Gateway off; dialer restoration needs attention"
                     else -> "Gateway off; calls stay with your dialer"
                 }
+            }
+            if (h.effectiveCallAccess == CallAccess.DIALER) {
+                Text("Turning on requests the default-dialer role. Turning off restores your previous dialer unless you keep the role in Advanced settings.",
+                    style = MaterialTheme.typography.bodySmall)
             }
             if (h.settingsPending) Text("Settings will apply after current calls end")
         }
@@ -100,11 +110,17 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
             Text(h.readinessDetail, style = MaterialTheme.typography.bodySmall)
             if (h.effectiveCallAccess == CallAccess.DIALER && !h.holdsDialer) {
                 Text("Default-dialer mode bridges calls through the PBX. For manual calling, switch back to your usual dialer.")
-                Button(onClick = requestDialer, enabled = h.dialerRoleAvailable) { Text("Select as default dialer") }
+                if (cur.takeover && !h.dialerChangePending) {
+                    Button(onClick = { setTakeover(true) }, enabled = h.dialerRoleAvailable && !h.dialerChangeRunning) { Text("Enable takeover") }
+                }
                 if (!h.dialerRoleAvailable) Text("Default dialer selection is unavailable on this device.")
             }
             if (roleMessage.isNotEmpty()) Text(roleMessage)
-            if (h.holdsDialer) OutlinedButton(onClick = switchDialer) { Text("Switch dialer") }
+            if (h.dialerChangeFailed || (h.holdsDialer && !cur.takeover && !cur.keepDefaultDialer)) {
+                if (h.holdsDialer) OutlinedButton(onClick = switchDialer, enabled = !h.dialerChangeRunning) { Text("Restore previous dialer") }
+                OutlinedButton(onClick = chooseDialer, enabled = !h.dialerChangeRunning) { Text("Choose dialer in Settings") }
+            }
+            if (h.dialerChangePending) OutlinedButton(onClick = cancelDialer) { Text("Cancel dialer change") }
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -134,6 +150,18 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
                     { when (it) { CallAccess.AUTO -> "Automatic"; CallAccess.COMPANION -> "Alongside dialer"; else -> "Default dialer" } }) {
                     rt.applySettings(cur.copy(callAccess = it))
                 }
+                Toggle("Keep default-dialer role when gateway is off", cur.keepDefaultDialer,
+                    { rt.setKeepDefaultDialer(it) }) {
+                    "Applies the next time takeover is switched off. Restore manually below when needed."
+                }
+                if (h.holdsDialer) {
+                    OutlinedButton(onClick = switchDialer, enabled = !h.dialerChangeRunning) { Text("Restore previous dialer") }
+                } else if (h.dialerRoleAvailable) {
+                    OutlinedButton(onClick = requestDialer, enabled = !h.dialerChangeRunning) { Text("Become default dialer") }
+                }
+                OutlinedButton(onClick = chooseDialer, enabled = !h.dialerChangeRunning) { Text("Choose dialer in Settings") }
+                Text("Manual dialer selection leaves takeover unchanged. Selecting Default dialer above applies to the next switch-on.",
+                    style = MaterialTheme.typography.bodySmall)
                 Choice("Cellular audio", listOf(AudioMethod.AUTO, AudioMethod.LEGACY, AudioMethod.OFFICIAL), cur.audioMethod,
                     { when (it) { AudioMethod.AUTO -> "Automatic"; AudioMethod.LEGACY -> "Direct telephony"; else -> "Call redirection" } },
                     enabled = { it != AudioMethod.OFFICIAL || Build.VERSION.SDK_INT >= 33 }) {

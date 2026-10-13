@@ -14,8 +14,10 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 data class GatewaySettings(
-    /** Master switch. Off: the app leaves every call alone, exactly as if it were not installed. */
+    /** Master switch; call cleanup and default-dialer restoration may finish later. */
     val takeover: Boolean = true,
+    /** Retain the role on switch-off instead of returning to the saved dialer. */
+    val keepDefaultDialer: Boolean = false,
     /** Mute local call output while bridged. Telecom manages microphone mute independently. */
     val muteEarpiece: Boolean = true,
     val server: String = "",
@@ -65,6 +67,7 @@ class SettingsStore(context: Context) {
 
     fun load(): GatewaySettings = GatewaySettings(
         takeover = prefs.getBoolean("takeover", true),
+        keepDefaultDialer = prefs.getBoolean("keep_default_dialer", false),
         muteEarpiece = prefs.getBoolean("mute_earpiece", true),
         server = prefs.getString("server", "")!!,
         port = prefs.getInt("port", 5060),
@@ -86,6 +89,7 @@ class SettingsStore(context: Context) {
     fun save(s: GatewaySettings) {
         prefs.edit()
             .putBoolean("takeover", s.takeover)
+            .putBoolean("keep_default_dialer", s.keepDefaultDialer)
             .putBoolean("mute_earpiece", s.muteEarpiece)
             .putString("server", s.server.trim())
             .putInt("port", s.port)

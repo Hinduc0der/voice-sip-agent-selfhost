@@ -13,6 +13,7 @@ import android.util.Log
 import io.github.sparkcyf.voicesipagent.privileged.HealthKeys
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
 import io.github.sparkcyf.voicesipagent.privileged.IPrivilegedService
+import io.github.sparkcyf.voicesipagent.privileged.DialerRoleResult
 import kotlin.system.exitProcess
 
 /**
@@ -26,6 +27,8 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     private var tap: CallAudioTap? = null
     private var lastTapStats = "no tap yet"
     private val audioManager by lazy { ShellEnv.audioManager(shellCtx) }
+    private val dialerPlatform by lazy { ShellDialerPlatform(shellCtx, appUid) }
+    private val dialerRoles by lazy { DialerRoles(appPackage, dialerPlatform) }
 
     /** Never held while taking the service or tap monitors (tap close calls back in). */
     private val muteLock = Any()
@@ -74,6 +77,24 @@ class PrivilegedService(context: Context) : IPrivilegedService.Stub() {
     }
 
     override fun getUid(): Int { enforceCaller(); return Process.myUid() }
+
+    override fun dialerState(): Bundle = dialerOperation {
+        DialerRoleResult(DialerRoleResult.STATE, "", dialerPlatform.state())
+    }
+
+    override fun becomeDefaultDialer(expectedHolder: String): Bundle = dialerOperation { dialerRoles.acquire(expectedHolder) }
+
+    override fun restoreDefaultDialer(previousHolder: String): Bundle = dialerOperation { dialerRoles.restore(previousHolder) }
+
+    private fun dialerOperation(operation: () -> DialerRoleResult): Bundle {
+        enforceCaller()
+        return asHelper {
+            try { operation().toBundle() } catch (e: Exception) {
+                val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                DialerRoleResult(DialerRoleResult.FAILED, "Dialer operation failed: ${cause.message}").toBundle()
+            }
+        }
+    }
 
     override fun setup(packageName: String, takeover: Boolean): Bundle {
         return setupCallAccess(packageName, takeover, CallAccess.AUTO)
