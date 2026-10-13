@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.telecom.Call
 import io.github.sparkcyf.voicesipagent.telephony.GatewayInCallService
+import io.github.sparkcyf.voicesipagent.telephony.telecomState
 
 /** The role-qualified UI service shares call ownership with companion mode. */
 class GatewayDialerService : GatewayInCallService() {
@@ -38,10 +39,10 @@ class GatewayDialerService : GatewayInCallService() {
 
     private fun updateNotification() {
         val nm = getSystemService(NotificationManager::class.java)
-        val live = calls.filter { it.state != Call.STATE_DISCONNECTED }
+        val live = calls.filter { it.telecomState != Call.STATE_DISCONNECTED }
         if (live.isEmpty()) { nm.cancel(ID); return }
         nm.createNotificationChannel(NotificationChannel(CHANNEL, "Cellular call", NotificationManager.IMPORTANCE_HIGH))
-        val incoming = live.any { it.state == Call.STATE_RINGING }
+        val incoming = live.any { it.telecomState == Call.STATE_RINGING }
         val open = PendingIntent.getActivity(this, ID, Intent(this, GatewayDialerActivity::class.java)
             .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val notification = Notification.Builder(this, CHANNEL)

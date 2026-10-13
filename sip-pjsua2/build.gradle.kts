@@ -14,8 +14,8 @@ android {
     sourceSets {
         getByName("main") {
             // Produced by native/build-pjsua2.sh (git-ignored).
-            java.srcDir("src/generated/java")
-            jniLibs.srcDir("src/generated/jniLibs")
+            java.directories.add("src/generated/java")
+            jniLibs.directories.add("src/generated/jniLibs")
         }
     }
     compileOptions {
@@ -29,7 +29,7 @@ dependencies {
     testImplementation(libs.junit)
 }
 
-val checkPjsua2 by tasks.registering {
+val checkPjsua2 = tasks.register("checkPjsua2") {
     val marker = file("src/generated/java/org/pjsip/pjsua2/Endpoint.java")
     doLast {
         if (!marker.exists()) throw GradleException("pjsua2 binding missing: run sip-pjsua2/native/build-pjsua2.sh first")

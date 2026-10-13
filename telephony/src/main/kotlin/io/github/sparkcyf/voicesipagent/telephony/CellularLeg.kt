@@ -42,7 +42,7 @@ class CellularLeg internal constructor(
         call = c
         c.registerCallback(callback, main)
         if (stopping) { disconnectSafely(c); return }
-        onTelecomState(c.state)
+        onTelecomState(c.telecomState)
     }
 
     internal fun onRemoved() {
@@ -186,7 +186,7 @@ class CellularLeg internal constructor(
         main.post {
             if (stopping || !endpoint.owns(this)) return@post
             val c = call ?: return@post
-            if (c.state == Call.STATE_RINGING) c.answer(VideoProfile.STATE_AUDIO_ONLY)
+            if (c.telecomState == Call.STATE_RINGING) c.answer(VideoProfile.STATE_AUDIO_ONLY)
         }
     }
 
@@ -206,7 +206,7 @@ class CellularLeg internal constructor(
     }
 
     private fun disconnect(c: Call) {
-        if (c.state == Call.STATE_RINGING && direction == LegDirection.INBOUND) c.reject(false, null) else c.disconnect()
+        if (c.telecomState == Call.STATE_RINGING && direction == LegDirection.INBOUND) c.reject(false, null) else c.disconnect()
     }
 
     private fun disconnectSafely(c: Call) {

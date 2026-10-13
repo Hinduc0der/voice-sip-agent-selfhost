@@ -6,8 +6,6 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.net.Uri
 import android.telecom.Call
-import android.telecom.CallAudioState
-import android.telecom.InCallService
 import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
@@ -34,7 +32,7 @@ class CellularOwnershipTest {
     private val main = mock(Handler::class.java)
     private val context = mock(Context::class.java)
     private val telecom = mock(TelecomManager::class.java)
-    private val service = mock(InCallService::class.java)
+    private val service = mock(GatewayInCallService::class.java)
     private lateinit var endpoint: CellularEndpoint
     private lateinit var leg: CellularLeg
     private lateinit var call: Call
@@ -44,7 +42,6 @@ class CellularOwnershipTest {
     private var earlyLoss = false
     private var opened: Handle? = null
     private var lost: ((String) -> Unit)? = null
-    private val audioState = mock(CallAudioState::class.java)
     private var originalMute = false
 
     private class Handle(private val failClose: Boolean) : CallAudioHandle {
@@ -62,8 +59,7 @@ class CellularOwnershipTest {
         val account = mock(PhoneAccount::class.java)
         doReturn(true).`when`(account).hasCapabilities(PhoneAccount.CAPABILITY_SIM_SUBSCRIPTION)
         doReturn(account).`when`(telecom).getPhoneAccount(any(PhoneAccountHandle::class.java))
-        doAnswer { originalMute }.`when`(audioState).isMuted
-        doReturn(audioState).`when`(service).callAudioState
+        doAnswer { originalMute }.`when`(service).microphoneMuted
         endpoint = CellularEndpoint(context, CallAudioOpener { onLost ->
             openCount++
             lost = onLost
@@ -84,6 +80,7 @@ class CellularOwnershipTest {
         CellularEndpoint.detachService(service)
     }
 
+    @Suppress("DEPRECATION") // Stub the getter used on API 30.
     private fun makeCall(initial: Int, direction: Int = Call.Details.DIRECTION_INCOMING): Call {
         val c = mock(Call::class.java)
         val details = mock(Call.Details::class.java)
@@ -99,6 +96,7 @@ class CellularOwnershipTest {
         return c
     }
 
+    @Suppress("DEPRECATION") // Keep the API 30 getter in step with the state callback.
     private fun state(c: Call, value: Int) {
         doReturn(value).`when`(c).state
         callbacks.getValue(c).toList().forEach { it.onStateChanged(c, value) }
@@ -317,7 +315,7 @@ class CellularOwnershipTest {
 
     @Test fun oldServiceCallbacksCannotClearReplacementCalls() {
         active(); open()
-        val replacement = mock(InCallService::class.java)
+        val replacement = mock(GatewayInCallService::class.java)
         CellularEndpoint.attachService(replacement)
         assertEquals(LegState.ENDED, leg.state)
         val manual = makeCall(Call.STATE_ACTIVE, Call.Details.DIRECTION_OUTGOING)
@@ -331,7 +329,7 @@ class CellularOwnershipTest {
     }
 
     @Test fun dialerBindingDuringCallDoesNotReplaceOwnerOrOpenDuplicateAudio() {
-        val dialer = mock(InCallService::class.java)
+        val dialer = mock(GatewayInCallService::class.java)
         CellularEndpoint.attachManagedService(service, false)
         try {
             active(); open()

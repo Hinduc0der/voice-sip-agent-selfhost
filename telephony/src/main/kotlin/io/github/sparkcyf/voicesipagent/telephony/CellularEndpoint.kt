@@ -11,7 +11,6 @@ import android.os.Looper
 import android.os.SystemClock
 import android.telecom.Call
 import android.telecom.TelecomManager
-import android.telecom.InCallService
 import android.telephony.TelephonyManager
 import io.github.sparkcyf.voicesipagent.voice.CallEndpoint
 import io.github.sparkcyf.voicesipagent.voice.CallLeg
@@ -52,8 +51,8 @@ class CellularEndpoint(
     /** Legs we own, keyed by Telecom call. Main thread only. */
     private val legs = HashMap<Call, CellularLeg>()
     private val observed = LinkedHashMap<Call, Call.Callback>()
-    private val mute = MuteLease<CellularLeg, InCallService>(
-        { it.callAudioState?.isMuted }, { svc, value -> svc.setMuted(value) })
+    private val mute = MuteLease<CellularLeg, GatewayInCallService>(
+        { it.microphoneMuted }, { svc, value -> svc.setMuted(value) })
     @Volatile private var closed = false
     @Volatile var hasCalls = false; private set
     var onCallsChanged: ((CallSnapshot) -> Unit)? = null
@@ -172,7 +171,7 @@ class CellularEndpoint(
 
     // ------------------------------------------------------------ InCallService callbacks (main thread)
 
-    internal fun onCallAdded(source: InCallService, call: Call) {
+    internal fun onCallAdded(source: GatewayInCallService, call: Call) {
         if (source !== service || closed) return
         if (observed.containsKey(call)) return
         val watcher = object : Call.Callback() {
@@ -198,7 +197,7 @@ class CellularEndpoint(
             }
             Call.Details.DIRECTION_INCOMING -> {
                 val h = handler
-                if (h == null || !status.ready || call.state != Call.STATE_RINGING || legs.isNotEmpty() ||
+                if (h == null || !status.ready || call.telecomState != Call.STATE_RINGING || legs.isNotEmpty() ||
                     pending.isNotEmpty() || hasForeignCall(except = call) || !isCellular(call) ||
                     (number.isNotEmpty() && isEmergencyNumber(number))) {
                     log("leaving incoming call ${redactNumber(number)} to the phone app")
@@ -216,7 +215,7 @@ class CellularEndpoint(
         reconcileCalls(); reportCalls()
     }
 
-    internal fun onCallRemoved(source: InCallService, call: Call) {
+    internal fun onCallRemoved(source: GatewayInCallService, call: Call) {
         if (source !== service) return
         observed.remove(call)?.let { runCatching { call.unregisterCallback(it) } }
         legs.remove(call)?.onRemoved()
@@ -232,7 +231,7 @@ class CellularEndpoint(
 
     /** True if Telecom has a live call we do not own (e.g. the user's own conversation). */
     private fun hasForeignCall(except: Call? = null): Boolean {
-        return observed.keys.any { it !== except && it !in legs && it.state != Call.STATE_DISCONNECTED }
+        return observed.keys.any { it !== except && it !in legs && it.telecomState != Call.STATE_DISCONNECTED }
     }
 
     internal fun owns(leg: CellularLeg) = leg.call?.let { legs[it] === leg } == true
@@ -246,8 +245,8 @@ class CellularEndpoint(
     }
 
     internal fun canTap(leg: CellularLeg): Boolean = !closed && !leg.stopping && status.ready && service != null &&
-        leg.call?.let { legs[it] === leg && it.state == Call.STATE_ACTIVE && isCellular(it) } == true &&
-        observed.keys.count { it.state != Call.STATE_DISCONNECTED } == 1
+        leg.call?.let { legs[it] === leg && it.telecomState == Call.STATE_ACTIVE && isCellular(it) } == true &&
+        observed.keys.count { it.telecomState != Call.STATE_DISCONNECTED } == 1
 
     internal fun acquireMute(leg: CellularLeg): Boolean {
         if (!canTap(leg)) return false
@@ -260,7 +259,7 @@ class CellularEndpoint(
     }
 
     private fun reconcileCalls() {
-        if (observed.keys.count { it.state != Call.STATE_DISCONNECTED } > 1) {
+        if (observed.keys.count { it.telecomState != Call.STATE_DISCONNECTED } > 1) {
             legs.values.toList().forEach { it.abortAudio("additional call makes telephony routing unsafe") }
         }
         legs.values.toList().filter { it.call?.let(::isCellular) != true }.forEach {
@@ -291,11 +290,11 @@ class CellularEndpoint(
     }
 
     private fun reportCalls() {
-        val live = observed.keys.filter { it.state != Call.STATE_DISCONNECTED }
+        val live = observed.keys.filter { it.telecomState != Call.STATE_DISCONNECTED }
         hasCalls = live.isNotEmpty() || pending.isNotEmpty()
-        onCallsChanged?.invoke(CallSnapshot(live.size, live.any { it.state == Call.STATE_RINGING },
+        onCallsChanged?.invoke(CallSnapshot(live.size, live.any { it.telecomState == Call.STATE_RINGING },
             live.count { it in legs }, if (live.isEmpty()) "No cellular call" else
-                live.joinToString { if (it in legs) "Gateway call: ${stateLabel(it.state)}" else "Other call: ${stateLabel(it.state)}" }))
+                live.joinToString { if (it in legs) "Gateway call: ${stateLabel(it.telecomState)}" else "Other call: ${stateLabel(it.telecomState)}" }))
     }
 
     private fun sameNumber(a: String, b: String): Boolean {
@@ -310,22 +309,19 @@ class CellularEndpoint(
         private const val PLACEMENT_TIMEOUT_MS = 10_000L
 
         @Volatile internal var current: CellularEndpoint? = null
-        @Volatile private var service: InCallService? = null
-        private val managedServices = LinkedHashMap<InCallService, Boolean>()
+        @Volatile private var service: GatewayInCallService? = null
+        private val managedServices = LinkedHashMap<GatewayInCallService, Boolean>()
         private var preferDialerService = false
 
         val isInCallServiceBound: Boolean get() = service != null
-        val boundServiceDescription: String? get() = service?.let(::serviceDescription)
+        val boundServiceDescription: String? get() = service?.serviceDescription
 
-        private fun serviceDescription(s: InCallService): String =
-            (s as? GatewayInCallService)?.serviceDescription ?: "InCallService"
-
-        internal fun attachManagedService(s: InCallService, dialer: Boolean) {
+        internal fun attachManagedService(s: GatewayInCallService, dialer: Boolean) {
             managedServices[s] = dialer
             selectManagedService()
         }
 
-        internal fun detachManagedService(s: InCallService) {
+        internal fun detachManagedService(s: GatewayInCallService) {
             managedServices.remove(s)
             detachService(s)
             selectManagedService()
@@ -353,18 +349,18 @@ class CellularEndpoint(
             )
         }
 
-        fun attachService(s: InCallService) {
+        fun attachService(s: GatewayInCallService) {
             if (service === s) return
             if (service != null) current?.clearCalls("InCallService replaced")
             service = s
-            current?.log("${serviceDescription(s)} bound")
+            current?.log("${s.serviceDescription} bound")
         }
 
-        fun detachService(s: InCallService) {
+        fun detachService(s: GatewayInCallService) {
             if (service !== s) return
             service = null
             current?.clearCalls("InCallService disconnected")
-            current?.log("${serviceDescription(s)} unbound")
+            current?.log("${s.serviceDescription} unbound")
         }
 
         private fun stateLabel(state: Int) = when (state) {
