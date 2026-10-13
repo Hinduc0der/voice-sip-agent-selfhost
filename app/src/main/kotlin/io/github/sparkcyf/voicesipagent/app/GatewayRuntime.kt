@@ -74,6 +74,14 @@ data class HealthState(
 ) {
     val privilegedReady: Boolean
         get() = callAccessReady && audioReady && shizuku == ShizukuConnector.State.CONNECTED
+
+    /** Standby needs persistence; inactive companion/dialer configurations do not. */
+    val needsForegroundService: Boolean
+        get() = session != null || calls.owned > 0 || when (effectiveCallAccess) {
+            CallAccess.COMPANION -> takeover
+            CallAccess.DIALER -> holdsDialer
+            else -> false
+        }
 }
 
 /**
@@ -91,7 +99,13 @@ class GatewayRuntime private constructor(context: Context) {
     val settingsFlow: StateFlow<GatewaySettings> = _settings
     val settings: GatewaySettings get() = _settings.value
 
-    private val _health = MutableStateFlow(HealthState())
+    // Service entry points can run before the worker initializes. Use the actual saved switch and
+    // role immediately so opening the app or receiving BOOT_COMPLETED cannot flash an idle notification.
+    private val _health = MutableStateFlow(run {
+        val holds = holdsDialer()
+        HealthState(takeover = settings.takeover, holdsDialer = holds,
+            effectiveCallAccess = CallAccess.effective(settings.callAccess, Build.VERSION.SDK_INT, holds))
+    })
     val health: StateFlow<HealthState> = _health
 
     val shizuku = ShizukuConnector(app) { AppLog.i(it) }
@@ -110,6 +124,7 @@ class GatewayRuntime private constructor(context: Context) {
     private var restartPending = false
     private var loopbackPending: Boolean? = null
     private var setupPending = false
+    private var foregroundRequested: Boolean? = null
 
     private val sipLog = object : SipLog {
         override fun info(msg: String) = AppLog.i("sip: $msg")
@@ -125,7 +140,10 @@ class GatewayRuntime private constructor(context: Context) {
         started = true
         cellular.onCallsChanged = { snapshot ->
             _health.update { it.copy(calls = snapshot, inCallServiceBound = CellularEndpoint.isInCallServiceBound) }
-            worker.execute { if (!cellular.hasCalls && _health.value.session == null) applyDeferredChanges() }
+            worker.execute {
+                syncForegroundService()
+                if (!cellular.hasCalls && _health.value.session == null) applyDeferredChanges()
+            }
         }
         ContextCompat.registerReceiver(app, object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) { refreshCallAccess() }
@@ -265,6 +283,13 @@ class GatewayRuntime private constructor(context: Context) {
             (h.loopbackTest || h.sip.ready)
         _health.update { it.copy(callAccessReady = access, audioReady = audio, cellularReady = ready, readinessDetail = detail) }
         cellular.setReadiness(ready, detail)
+        syncForegroundService()
+    }
+
+    private fun syncForegroundService() {
+        val h = _health.value
+        if (foregroundRequested == h.needsForegroundService) return
+        if (GatewayService.sync(app, h)) foregroundRequested = h.needsForegroundService
     }
 
     private fun hasActiveWork() = cellular.hasCalls || _health.value.session != null
@@ -419,7 +444,10 @@ class GatewayRuntime private constructor(context: Context) {
         )
         b.addListener { session ->
             _health.update { it.copy(session = describe(session)) }
-            if (session.endedAtMs != null) worker.execute { if (!cellular.hasCalls) applyDeferredChanges() }
+            worker.execute {
+                syncForegroundService()
+                if (session.endedAtMs != null && !cellular.hasCalls) applyDeferredChanges()
+            }
         }
         b.start()
         bridge = b

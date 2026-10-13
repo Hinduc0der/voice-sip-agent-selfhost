@@ -79,6 +79,9 @@ Emergency numbers are always refused and are never dialed through the gateway.
 5. **Take over calls** is the master switch. Switching it off waits for current calls to end, then stops bridging
    and companion integration. If this app is the default dialer, its recovery screen stays available;
    use **Switch dialer** to return normal call handling to your usual dialer.
+   In companion mode, switching takeover off also stops the foreground service and removes its notification;
+   idle gateway standby keeps both running. In dialer mode, the service runs while this app is the default
+   dialer. Owned calls finish cleanup before the service stops.
 
 Advanced settings are collapsed by default. They contain call-access and cellular-audio choices, automatic
 handset suppression when supported, loopback, debug logging, and diagnostics. The call log remains visible
