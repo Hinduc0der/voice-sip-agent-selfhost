@@ -157,9 +157,16 @@ for ABI in "${ABI_LIST[@]}"; do
   # Bulk byte[] <-> ByteVector copies; the stock binding is a List<Short> with one JNI call per byte.
   # Must precede %template(ByteVector), so it goes right after the and_string.i include.
   I="$SRC/pjsip-apps/src/swig/pjsua2.i"
-  awk -v ext="$HERE/pjsua2-java-ext.i" '{ print } /^%include "and_string.i"/ { while ((getline l < ext) > 0) print l }' "$I" > "$I.new"
+  # Apply the Java feature profile after upstream director declarations so its
+  # Endpoint override takes effect, but before headers and feature templates.
+  awk -v ext="$HERE/pjsua2-java-ext.i" -v profile="$HERE/pjsua2-java-profile.i" '
+    /^%import "pj\/config_site.h"/ { while ((getline l < profile) > 0) print l }
+    { print }
+    /^%include "and_string.i"/ { while ((getline l < ext) > 0) print l }
+  ' "$I" > "$I.new"
   mv "$I.new" "$I"
   grep -q vsaOutCap "$I"
+  grep -q 'Voice gateway Java binding profile' "$I"
   (
     cd "$SRC"
     # configure-android replaces CXXFLAGS, but carries CPPFLAGS into both C and C++.

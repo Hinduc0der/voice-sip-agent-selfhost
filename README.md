@@ -244,6 +244,17 @@ Native C/C++ code uses ThinLTO, hidden visibility and section garbage collection
 exposes only PJSUA2 JNI entry points; OpenSSL, Opus and PJSIP symbols are local. The build checks exports
 and writes `pjsua2.exports.txt` under the ABI work directory. Exported JNI wrappers and OpenSSL's internal
 algorithm registries still retain reachable code; Java shrinking alone does not remove native wrappers.
+
+`native/pjsua2-java-profile.i` trims the Java/JNI surface by feature group while keeping upstream
+`pjsua2.i`: video, buddies, file playback/recording, AI media ports, tone generators and JSON persistence
+are excluded. `Endpoint` uses its native default callbacks; `Account`, `Call`, `AudioMediaPort` and
+`LogWriter` retain Java directors, including their default callbacks. SIP/TLS/SRTP configuration, codec
+controls, `AudDevManager.setNullDev()` and bulk PCM copies remain available. Restore an excluded group
+in that file if needed, or the `Endpoint` director if subclassing it. On PJSIP upgrades, check the
+exclusions against upstream names, rebuild the bindings and app (including release), and verify SIP
+callbacks and audio on a device. This profile
+reduces JNI reachability; it does not remove all underlying native implementations.
+
 Release builds enable R8 with consumer rules preserving SWIG bindings/director callbacks and Shizuku's
 reflectively loaded service constructor. Other app and dependency code can be optimized. Validate a release
 APK's Shizuku startup, SIP callbacks and TLS/SRTP audio before relying on new shrinking rules.

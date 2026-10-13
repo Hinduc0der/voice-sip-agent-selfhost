@@ -122,7 +122,9 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   - `stop()` waits for the un-REGISTER response (≤1.5 s): the new account reuses the same Contact, and a late
     un-REGISTER would remove the new binding.
   - Build patches (`native/`): `config_site.h`, `pjsua2-java-ext.i` (bulk-copy typemap for ByteVector; must come
-    before `%template(ByteVector)`; SWIG director threads stay attached), `pjsip-tls-wildcard.patch` (RFC 6125
+    before `%template(ByteVector)`; SWIG director threads stay attached), `pjsua2-java-profile.i` (feature-group
+    exclusions applied after upstream director declarations; retain Account/Call/AudioMediaPort/LogWriter
+    directors, setNullDev and PCM copies), `pjsip-tls-wildcard.patch` (RFC 6125
     wildcard certificate matching). pjsua's log callback is gated by `consoleLevel`, not just stdout.
   - Native dependencies and the wrapper use NDK ThinLTO and section GC. `pjsua2.exports.map` localizes
     everything except JNI entry points; `build-pjsua2.sh` checks the final dynamic export table.
