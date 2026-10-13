@@ -20,6 +20,11 @@ OPUS_VERSION=1.6.1
 OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
 ABIS=${ABIS:-arm64-v8a}
 APP_PLATFORM=${APP_PLATFORM:-android-30}
+NATIVE_SIZE_REPORTS=${NATIVE_SIZE_REPORTS:-0}
+case $NATIVE_SIZE_REPORTS in
+  0|1) ;;
+  *) echo "NATIVE_SIZE_REPORTS must be 0 or 1" >&2; exit 1 ;;
+esac
 # Use one NDK toolchain for ThinLTO across all static dependencies and the JNI wrapper.
 NATIVE_CFLAGS="-O2 -fPIC -flto=thin -ffunction-sections -fdata-sections -fvisibility=hidden"
 NATIVE_LDFLAGS="-flto=thin -Wl,--gc-sections"
@@ -122,7 +127,8 @@ for ABI in "${ABI_LIST[@]}"; do
     export PATH="$LLVM_BIN:$PATH"
     export AR="$LLVM_BIN/llvm-ar" RANLIB="$LLVM_BIN/llvm-ranlib"
     perl "$WORK/openssl-$OSSL_VERSION/Configure" "$OSSL_TARGET" -D__ANDROID_API__="$API" \
-      no-shared no-tests no-apps no-docs no-engine no-comp no-ssl3 no-weak-ssl-ciphers no-legacy\
+      no-shared no-tests no-apps no-docs no-engine no-comp no-weak-ssl-ciphers no-legacy\
+      no-quic no-sm2 no-sm3 no-sm4 \
       --prefix="$SSL_PREFIX" --openssldir=/nonexistent --libdir=lib $NATIVE_CFLAGS
     make -j"$JOBS" build_libs
     make install_dev
@@ -143,6 +149,7 @@ for ABI in "${ABI_LIST[@]}"; do
 
   OUT="$SRC/pjsip-apps/src/swig/java/android/pjsua2/src/main"
   LIB="$OUT/jniLibs/$ABI/libpjsua2.so"
+  LINK_MAP="$ABI_WORK/pjsua2.link.map"
   tar xzf "$TARBALL" -C "$ABI_WORK"
   cp "$HERE/config_site.h" "$SRC/pjlib/include/pj/config_site.h"
   # Accept "*." wildcard server certificates (RFC 6125); stock pjsip rejects them per RFC 5922.
@@ -188,9 +195,22 @@ for ABI in "${ABI_LIST[@]}"; do
     # Localize dependencies only at the shared JNI link, not configure's executables.
     # Treat the generated source as already made, irrespective of extracted header timestamps.
     # This skips only SWIG; fresh per-ABI objects and JNI libraries must still be built.
+    JNI_LDFLAGS="$LDFLAGS -Wl,--version-script=$HERE/pjsua2.exports.map -Wl,--exclude-libs,ALL"
+    if [ "$NATIVE_SIZE_REPORTS" = 1 ]; then
+      JNI_LDFLAGS+=" -Wl,-Map=$LINK_MAP"
+    fi
     make -C "$SWIG_DIR" -o output/pjsua2_wrap.cpp \
-      LDFLAGS="$LDFLAGS -Wl,--version-script=$HERE/pjsua2.exports.map -Wl,--exclude-libs,ALL"
+      LDFLAGS="$JNI_LDFLAGS"
   )
+
+  if [ "$NATIVE_SIZE_REPORTS" = 1 ]; then
+    [ -s "$LINK_MAP" ] || { echo "JNI linker map missing: $LINK_MAP" >&2; exit 1; }
+    # Inspect the original ELF before APK stripping removes the local symbol table.
+    "$LLVM_BIN/llvm-size" --format=sysv --radix=10 "$LIB" > "$ABI_WORK/pjsua2.sections.txt"
+    "$LLVM_BIN/llvm-nm" --defined-only --print-size --size-sort --reverse-sort --radix=d --demangle \
+      "$LIB" > "$ABI_WORK/pjsua2.symbol-sizes.txt"
+    echo "Native size reports: $ABI_WORK/pjsua2.{link.map,sections.txt,symbol-sizes.txt}"
+  fi
 
   EXPORTS="$ABI_WORK/pjsua2.exports.txt"
   "$LLVM_BIN/llvm-nm" -D --defined-only --extern-only "$LIB" > "$EXPORTS"

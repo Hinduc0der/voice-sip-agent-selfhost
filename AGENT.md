@@ -61,6 +61,11 @@ x86_64; build both with `ABIS="arm64-v8a x86_64" APP_PLATFORM=android-30` before
 the app's Gradle `abiFilters` and build matching native libraries.
 Android 11–13 compatibility and physical audio are provisional until verified on devices.
 
+For native size analysis, run `NATIVE_SIZE_REPORTS=1 sip-pjsua2/native/build-pjsua2.sh` (off by default).
+Each ABI work directory gets `pjsua2.link.map`, `pjsua2.sections.txt`, and `pjsua2.symbol-sizes.txt`.
+Reports inspect the ELF before APK stripping; section totals differ from packaged size. Save reports
+before rebuilding, which recreates ABI work directories.
+
 ## Architecture
 
 Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on the host); `:telephony`,
