@@ -78,16 +78,9 @@ data class HealthState(
     val privilegedReady: Boolean
         get() = callAccessReady && audioReady && shizuku == ShizukuConnector.State.CONNECTED
 
-    /**
-     * Companion standby needs persistence while takeover is on; holding the dialer role keeps
-     * the reminder visible even when takeover is off.
-     */
+    /** Takeover needs persistence even before setup; a retained dialer role needs a reminder. */
     val needsForegroundService: Boolean
-        get() = session != null || calls.owned > 0 || when (effectiveCallAccess) {
-            CallAccess.COMPANION -> takeover
-            CallAccess.DIALER -> holdsDialer
-            else -> false
-        }
+        get() = takeover || holdsDialer || session != null || calls.owned > 0
 }
 
 /**
@@ -134,6 +127,9 @@ class GatewayRuntime private constructor(context: Context) {
     private var loopbackPending: Boolean? = null
     private var setupPending = false
     private var foregroundRequested: Boolean? = null
+    private var serviceToken: Any? = null
+    private var foregroundRunning = false
+    private val gatewayEnabled get() = foregroundRunning && _health.value.takeover
     private var pendingDialerChange: DialerChange? = null
     private var dialerRetry: ScheduledFuture<*>? = null
     private var healthCheck: ScheduledFuture<*>? = null
@@ -201,10 +197,59 @@ class GatewayRuntime private constructor(context: Context) {
         }
         configureCallAccess()
         _health.update { it.copy(takeover = settings.takeover) }
+        updateReadiness()
+        if (!_health.value.takeover) shizuku.stop()
+    }
+
+    /** Track ownership before promotion so destruction also cancels a failed start. */
+    internal fun onServiceCreated(service: Any) = worker.execute {
+        serviceToken = service
+        foregroundRunning = false
+    }
+
+    /** Called only after startForeground succeeds. All gateway work stays off the main thread. */
+    internal fun onForegroundStarted(service: Any) = worker.execute {
+        if (serviceToken !== service) return@execute
+        foregroundRunning = true
+        foregroundRequested = true
+        startGateway()
+        updateReadiness()
+    }
+
+    internal fun onForegroundStopped(service: Any) = worker.execute {
+        if (serviceToken !== service) return@execute
+        serviceToken = null
+        foregroundRunning = false
+        // Destruction releases resources, never changes roles or immediately restarts the service.
+        // An explicit launch or a later switch-on can request it again.
+        foregroundRequested = _health.value.needsForegroundService
+        if (pendingDialerChange != null) clearDialerChange()
+        stopGateway()
+        configureCallAccess()
+        updateReadiness()
+    }
+
+    private fun startGateway() {
+        if (!gatewayEnabled || healthCheck != null) return
+        configureCallAccess()
+        startBackgroundTasks()
         startSip()
         rebuildBridge()
-        updateReadiness()
-        if (_health.value.takeover) startBackgroundTasks() else shizuku.stop()
+    }
+
+    /** Stop producers before their dependencies; retain the helper for an explicit role handoff. */
+    private fun stopGateway() {
+        stopBackgroundTasks()
+        runCatching { stopBridge() }.onFailure { AppLog.w("bridge cleanup failed", it) }
+        runCatching { stopSip(releaseLibrary = true) }.onFailure { AppLog.w("SIP cleanup failed", it) }
+        shizuku.service?.let { svc ->
+            runCatching { svc.setupCallAccess(app.packageName, false, _health.value.effectiveCallAccess) }
+                .onFailure { AppLog.w("companion cleanup failed", it) }
+        }
+        if (pendingDialerChange == null) runCatching { shizuku.stop() }
+            .onFailure { AppLog.w("Shizuku cleanup failed", it) }
+        _health.update { it.copy(privileged = null, sip = EndpointStatus(false,
+            if (it.takeover) "gateway stopped" else "takeover off")) }
     }
 
     private fun startBackgroundTasks() {
@@ -228,20 +273,13 @@ class GatewayRuntime private constructor(context: Context) {
             app.getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
         }.onFailure { AppLog.w("network callback cleanup failed", it) }
         setupPending = false
-        // Withdraw companion registration with the existing helper before removing it. Off startup
-        // never starts a helper just for cleanup. Explicit role restoration can finish first.
-        shizuku.service?.let { svc ->
-            runCatching { svc.setupCallAccess(app.packageName, false, _health.value.effectiveCallAccess) }
-                .onFailure { AppLog.w("companion cleanup failed", it) }
-        }
-        if (pendingDialerChange == null) shizuku.stop()
         worker.allowCoreThreadTimeOut(true)
     }
 
     // ------------------------------------------------------------ privileged setup / health
 
     fun runSetup() = worker.execute {
-        if (!_health.value.takeover) { setupPending = false; return@execute }
+        if (!gatewayEnabled) { setupPending = false; return@execute }
         if (hasActiveWork()) {
             setupPending = true
             _health.update { it.copy(settingsPending = true) }
@@ -303,7 +341,7 @@ class GatewayRuntime private constructor(context: Context) {
         refreshRoleState()
         cellular.setPreferredDialerService(_health.value.holdsDialer)
         if (!cellular.hasCalls) CellularEndpoint.setCompanionComponentEnabled(app,
-            _health.value.takeover && _health.value.effectiveCallAccess == CallAccess.COMPANION && Build.VERSION.SDK_INT >= 31)
+            gatewayEnabled && _health.value.effectiveCallAccess == CallAccess.COMPANION && Build.VERSION.SDK_INT >= 31)
         // The dialer activity/UI service remain enabled, including when takeover is off.
     }
 
@@ -312,7 +350,7 @@ class GatewayRuntime private constructor(context: Context) {
         updateReadiness()
         // Changing companion registration can change binding. Defer app-controlled setup while
         // Telecom has any call, including calls outside the bridge.
-        if (_health.value.takeover) {
+        if (gatewayEnabled) {
             if (!hasActiveWork()) runSetup() else setupPending = true
         }
     }
@@ -355,13 +393,14 @@ class GatewayRuntime private constructor(context: Context) {
             h.dialerChangePending -> if (h.dialerChangeAcquire)
                 "Waiting to become the default dialer" else "Waiting to restore the previous dialer"
             !h.takeover -> if (h.holdsDialer) "Gateway off; this app still holds the dialer role" else "Gateway off"
+            !gatewayEnabled -> "Gateway service not running"
             !access -> requirements.problem!!
             h.shizuku != ShizukuConnector.State.CONNECTED -> "Shizuku not connected"
             !audio -> "Selected call audio unavailable: ${h.privilegedDetail}"
             !h.loopbackTest && !h.sip.ready -> "SIP unavailable: ${h.sip.detail}"
             else -> "Gateway ready"
         }
-        val ready = !h.dialerChangeRunning && h.takeover && access && audio && h.shizuku == ShizukuConnector.State.CONNECTED &&
+        val ready = !h.dialerChangeRunning && gatewayEnabled && access && audio && h.shizuku == ShizukuConnector.State.CONNECTED &&
             (h.loopbackTest || h.sip.ready)
         _health.update { it.copy(callAccessReady = access, audioReady = audio, cellularReady = ready, readinessDetail = detail) }
         cellular.setReadiness(ready, detail)
@@ -481,6 +520,7 @@ class GatewayRuntime private constructor(context: Context) {
     // ------------------------------------------------------------ SIP
 
     private fun startSip() {
+        if (!gatewayEnabled) return
         stopSip()
         val s = settings
         if (!s.takeover) {
@@ -550,21 +590,25 @@ class GatewayRuntime private constructor(context: Context) {
         }
     }
 
-    private fun stopSip() {
+    private fun stopSip(releaseLibrary: Boolean = false) {
         val previous = sip
         sip = null
-        when (val s = previous) {
-            is SipUserAgent -> s.stop()
-            is PjsipEndpoint -> {
-                // Keep the SIP socket only if pjsua2 is about to take it over again.
-                val n = settings
-                s.stop(
-                    releaseTransport = !(n.takeover && n.sipStack == SipStack.PJSUA2 && n.localSipPort == s.config.localPort &&
-                        SipTransport.of(n.sipTransport) == s.config.transport),
-                )
+        try {
+            when (val s = previous) {
+                is SipUserAgent -> s.stop()
+                is PjsipEndpoint -> {
+                    // Keep the SIP socket only if pjsua2 is about to take it over again.
+                    val n = settings
+                    s.stop(
+                        releaseTransport = releaseLibrary || !(n.takeover && n.sipStack == SipStack.PJSUA2 &&
+                            n.localSipPort == s.config.localPort && SipTransport.of(n.sipTransport) == s.config.transport),
+                    )
+                }
             }
+        } finally {
+            if (releaseLibrary || !_health.value.takeover || settings.sipStack != SipStack.PJSUA2)
+                PjsipEndpoint.stopLibrary()
         }
-        if (!_health.value.takeover || settings.sipStack != SipStack.PJSUA2) PjsipEndpoint.stopLibrary()
     }
 
     private fun refreshSipRegistration() {
@@ -599,11 +643,18 @@ class GatewayRuntime private constructor(context: Context) {
 
     // ------------------------------------------------------------ bridge
 
-    private fun rebuildBridge() {
-        bridge?.stop()
+    private fun stopBridge() {
+        val previous = bridge
         bridge = null
-        echo?.close()
+        val previousEcho = echo
         echo = null
+        _health.update { it.copy(session = null) }
+        try { previous?.stop() } finally { previousEcho?.close() }
+    }
+
+    private fun rebuildBridge() {
+        stopBridge()
+        if (!gatewayEnabled) return
         val s = settings
         if (!s.takeover) {
             bridge = null
@@ -632,14 +683,16 @@ class GatewayRuntime private constructor(context: Context) {
             log = { AppLog.i("bridge: $it") },
         )
         b.addListener { session ->
-            _health.update { it.copy(session = describe(session)) }
+            val description = describe(session)
             worker.execute {
+                if (bridge !== b) return@execute
+                _health.update { it.copy(session = description) }
                 syncForegroundService()
                 if (session.endedAtMs != null && !cellular.hasCalls) applyDeferredChanges()
             }
         }
-        b.start()
         bridge = b
+        b.start()
         AppLog.i("bridge ready: cellular <-> ${sideB.name}")
     }
 
@@ -704,9 +757,7 @@ class GatewayRuntime private constructor(context: Context) {
         val on = settings.takeover
         _health.update { it.copy(takeover = on, takeoverOffPending = false, takeoverOnPending = false) }
         configureCallAccess()
-        if (on) startBackgroundTasks() else stopBackgroundTasks()
-        startSip()
-        rebuildBridge()
+        if (on) startGateway() else stopGateway()
         // Withdraws or restores the Telecom companion override.
         runSetup()
         updateReadiness()

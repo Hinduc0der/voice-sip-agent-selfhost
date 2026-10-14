@@ -16,9 +16,9 @@ class GatewayServicePolicyTest {
         assertFalse(standby.copy(takeover = false).needsForegroundService)
     }
 
-    @Test fun dialerSelectionWithoutRoleDoesNotPersistButRoleAcquisitionDoes() {
+    @Test fun dialerSetupNeedsForegroundEvenBeforeRoleAcquisition() {
         val selected = HealthState(effectiveCallAccess = CallAccess.DIALER, holdsDialer = false)
-        assertFalse(selected.needsForegroundService)
+        assertTrue(selected.needsForegroundService)
         assertTrue(selected.copy(holdsDialer = true).needsForegroundService)
         val reminder = selected.copy(holdsDialer = true, takeover = false)
         assertTrue(reminder.needsForegroundService)
@@ -29,7 +29,7 @@ class GatewayServicePolicyTest {
 
     @Test fun losingRoleKeepsOwnedCallCleanupButOtherCallsDoNotKeepServiceAlive() {
         val lost = HealthState(effectiveCallAccess = CallAccess.DIALER, holdsDialer = false,
-            calls = CallSnapshot(count = 1, owned = 1))
+            takeover = false, calls = CallSnapshot(count = 1, owned = 1))
         assertTrue(lost.needsForegroundService)
         assertFalse(lost.copy(calls = CallSnapshot(count = 1, owned = 0)).needsForegroundService)
         assertFalse(lost.copy(calls = CallSnapshot()).needsForegroundService)
@@ -47,8 +47,8 @@ class GatewayServicePolicyTest {
             GatewayService.sync(context, dialer.copy(holdsDialer = true))
             GatewayService.sync(context, dialer.copy(holdsDialer = true, takeover = false))
             GatewayService.sync(context, dialer.copy(holdsDialer = false, takeover = false))
-            verify(context, times(3)).startForegroundService(any(Intent::class.java))
-            verify(context, times(3)).stopService(any(Intent::class.java))
+            verify(context, times(4)).startForegroundService(any(Intent::class.java))
+            verify(context, times(2)).stopService(any(Intent::class.java))
         }
     }
 }

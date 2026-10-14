@@ -155,7 +155,14 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
     rules without auditing generated JNI lookups and testing a release APK in both app and shell processes.
 - **Runtime (`:app`)**: `GatewayRuntime` singleton; every state-changing operation runs on the single-threaded
   `gateway-runtime` executor. It is started from `GatewayApp.onCreate` (Telecom may start the process just to bind
-  the InCallService). While takeover is enabled, a health check runs every 60 s and re-runs setup while idle if
+  the InCallService). Process startup initializes the permanent cellular observer; SIP, bridge, Shizuku,
+  network monitoring and health polling start only after `GatewayService` successfully enters foreground.
+  Takeover requests the foreground service even before dialer qualification or privileged setup succeeds.
+  Service ownership is tracked from creation, so destruction also cancels role requests if promotion fails.
+  Service destruction queues the same resource cleanup as switch-off, cancels pending role changes, and
+  never acquires/restores a role or immediately restarts itself. A service token prevents an old destruction
+  callback from stopping a replacement service. Telecom observation and role recovery UI remain available.
+  While takeover is enabled and the service is foreground, a health check runs every 60 s and re-runs setup while idle if
   companion mode is selected, and call access is unavailable. The override alone does not gate readiness;
   health checks never request the dialer role.
   Settings live in SharedPreferences; the SIP password is sealed with a Keystore AES-GCM key.

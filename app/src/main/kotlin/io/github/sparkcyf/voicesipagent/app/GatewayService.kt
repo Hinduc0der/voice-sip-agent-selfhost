@@ -31,6 +31,7 @@ class GatewayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var statusJob: Job? = null
     private var foreground = false
+    private val runtimeToken = Any()
     private val roleReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             GatewayRuntime.get(this@GatewayService).refreshCallAccess()
@@ -41,6 +42,7 @@ class GatewayService : Service() {
         super.onCreate()
         val runtime = GatewayRuntime.get(this)
         runtime.start()
+        runtime.onServiceCreated(runtimeToken)
         ContextCompat.registerReceiver(this, roleReceiver,
             IntentFilter(TelecomManager.ACTION_DEFAULT_DIALER_CHANGED), ContextCompat.RECEIVER_EXPORTED)
         runtime.refreshCallAccess()
@@ -53,7 +55,16 @@ class GatewayService : Service() {
             return START_NOT_STICKY
         }
         // Recheck at each start, including sticky restarts and rapid off/on transitions.
-        if (!foreground) promote(runtime.health.value)
+        if (!foreground) {
+            try {
+                promote(runtime.health.value)
+            } catch (e: Exception) {
+                AppLog.w("could not promote gateway service", e)
+                stopGateway(startId)
+                return START_NOT_STICKY
+            }
+        }
+        runtime.onForegroundStarted(runtimeToken)
         if (statusJob == null) {
             val nm = getSystemService(NotificationManager::class.java)
             statusJob = scope.launch {
@@ -87,6 +98,7 @@ class GatewayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        GatewayRuntime.get(this).onForegroundStopped(runtimeToken)
         unregisterReceiver(roleReceiver)
         scope.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)

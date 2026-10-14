@@ -10,40 +10,39 @@ import android.os.Bundle
 import android.os.Process
 import android.telecom.TelecomManager
 import android.util.Log
+import io.github.sparkcyf.voicesipagent.gateway.CallBridge
+import io.github.sparkcyf.voicesipagent.pjsua2.PjsipConfig
+import io.github.sparkcyf.voicesipagent.pjsua2.PjsipEndpoint
 import io.github.sparkcyf.voicesipagent.privileged.CallAccess
 import io.github.sparkcyf.voicesipagent.privileged.DialerRoleResult
 import io.github.sparkcyf.voicesipagent.privileged.IPrivilegedService
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
+import io.github.sparkcyf.voicesipagent.telephony.CallSnapshot
 import io.github.sparkcyf.voicesipagent.telephony.CellularEndpoint
+import io.github.sparkcyf.voicesipagent.voice.EndpointStatus
 import org.junit.Assert.*
 import org.junit.Test
+import org.mockito.MockedConstruction
 import org.mockito.Mockito.*
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 class GatewayRuntimeLifecycleTest {
-    @Test fun switchOnWaitsForHelperThenAcquiresCapturedDialer(): Unit = Fixture().use { f ->
-        f.runtime.setTakeover(true)
-        f.drain()
-        assertTrue(f.runtime.health.value.dialerChangePending)
-        verify(f.helper, never()).becomeDefaultDialer(anyString())
-        f.connect()
-        verify(f.helper).becomeDefaultDialer("phone")
-        assertFalse(f.runtime.health.value.dialerChangePending)
-    }
-
-    @Test fun switchOnWithNoDialerWaitsForHelperThenAcquiresEmptyRole(): Unit = Fixture().use { f ->
-        f.holder = null
-        f.runtime.setTakeover(true)
-        f.drain()
-        assertTrue(f.runtime.health.value.dialerChangePending)
-        assertFalse(f.runtime.health.value.dialerChangeFailed)
-        verify(f.helper, never()).becomeDefaultDialer(anyString())
-        f.connect()
-        verify(f.helper).becomeDefaultDialer("")
-        assertEquals("gateway", f.holder)
-        assertFalse(f.runtime.health.value.dialerChangePending)
+    @Test fun switchOnCapturesDialerBeforeHelperConnects() {
+        for (initialHolder in listOf("phone", null)) {
+            Fixture(holder = initialHolder).use { f ->
+                f.runtime.setTakeover(true)
+                f.drain()
+                assertTrue(f.runtime.health.value.dialerChangePending)
+                assertFalse(f.runtime.health.value.dialerChangeFailed)
+                verify(f.helper, never()).becomeDefaultDialer(anyString())
+                f.connect()
+                verify(f.helper).becomeDefaultDialer(initialHolder.orEmpty())
+                assertEquals("gateway", f.holder)
+                assertFalse(f.runtime.health.value.dialerChangePending)
+            }
+        }
     }
 
     @Test fun cancelledAcquisitionIsNotReplayedOnHelperConnection(): Unit = Fixture().use { f ->
@@ -57,8 +56,7 @@ class GatewayRuntimeLifecycleTest {
 
     @Test fun changedDialerWhileReconnectingIsLeftInPlace() {
         for (initialHolder in listOf("phone", null)) {
-            Fixture().use { f ->
-                f.holder = initialHolder
+            Fixture(holder = initialHolder).use { f ->
                 f.runtime.setTakeover(true)
                 f.drain()
                 assertTrue(f.runtime.health.value.dialerChangePending)
@@ -71,11 +69,6 @@ class GatewayRuntimeLifecycleTest {
         }
     }
 
-    @Test fun savedSwitchOnDoesNotAcquireDialerOnStartup(): Unit = Fixture(enabled = true).use { f ->
-        f.connect()
-        verify(f.helper, never()).becomeDefaultDialer(anyString())
-    }
-
     @Test fun switchingOffCancelsAcquisitionBeforeHelperConnects(): Unit = Fixture().use { f ->
         f.runtime.setTakeover(true)
         f.drain()
@@ -86,19 +79,147 @@ class GatewayRuntimeLifecycleTest {
         assertFalse(f.runtime.health.value.dialerChangePending)
     }
 
-    private class Fixture(enabled: Boolean = false) : AutoCloseable {
+    @Test fun rejectedForegroundLaunchAndQueuedControlsCannotStartResources(): Unit =
+        Fixture(enabled = true, rejectLaunch = true).use { f ->
+            f.runtime.restartSip()
+            f.runtime.setLoopbackTest(true)
+            f.runtime.applySettings(f.runtime.settings.copy(inboundTarget = "changed"))
+            f.runtime.runSetup()
+            f.drain()
+            verify(f.context, atLeastOnce()).startForegroundService(any(Intent::class.java))
+            verify(f.connector, never()).start()
+            verify(f.network, never()).registerDefaultNetworkCallback(any(ConnectivityManager.NetworkCallback::class.java))
+            assertTrue(f.endpoints.constructed().isEmpty())
+            assertTrue(f.bridges.constructed().isEmpty())
+            assertFalse(f.runtime.health.value.cellularReady)
+        }
+
+    @Test fun reminderOnlyPromotionDoesNotStartGateway(): Unit = Fixture(holder = "gateway").use { f ->
+        f.promote()
+        verify(f.connector, never()).start()
+        assertTrue(f.endpoints.constructed().isEmpty())
+        assertTrue(f.bridges.constructed().isEmpty())
+    }
+
+    @Test fun destructionBeforePromotionCancelsAcquisitionInsteadOfReplayingOnRestart(): Unit = Fixture().use { f ->
+        f.runtime.setTakeover(true)
+        f.runtime.onServiceCreated(f.serviceToken)
+        f.drain()
+        assertTrue(f.runtime.health.value.dialerChangePending)
+        verify(f.connector, never()).start()
+        assertTrue(f.endpoints.constructed().isEmpty())
+        clearInvocations(f.context)
+
+        // Promotion failed; destruction arrives without onForegroundStarted.
+        f.runtime.onForegroundStopped(f.serviceToken)
+        f.drain()
+        assertFalse(f.runtime.health.value.dialerChangePending)
+        verify(f.context, never()).startForegroundService(any(Intent::class.java))
+
+        f.serviceToken = Any()
+        f.connect()
+        verify(f.helper, never()).becomeDefaultDialer(anyString())
+        assertEquals("phone", f.holder)
+    }
+
+    @Test fun destructionContinuesCleanupAfterFailureWithoutRoleChangesOrAutomaticRestart(): Unit =
+        Fixture(enabled = true).use { f ->
+            f.connect()
+            val endpoint = f.endpoints.constructed().single()
+            val bridge = f.bridges.constructed().single()
+            verify(endpoint).start()
+            doThrow(IllegalStateException("bridge cleanup failed")).`when`(bridge).stop()
+            clearInvocations(f.context)
+            f.runtime.onForegroundStopped(f.serviceToken)
+            f.runtime.onForegroundStopped(f.serviceToken)
+            f.runtime.refreshCallAccess()
+            f.runtime.restartSip()
+            f.drain()
+            verify(bridge).stop()
+            verify(endpoint).stop(releaseTransport = true)
+            verify(f.network).unregisterNetworkCallback(any(ConnectivityManager.NetworkCallback::class.java))
+            verify(f.connector).stop()
+            verify(f.helper, never()).becomeDefaultDialer(anyString())
+            verify(f.helper, never()).restoreDefaultDialer(anyString())
+            verify(f.context, never()).startForegroundService(any(Intent::class.java))
+            assertEquals(1, f.endpoints.constructed().size)
+            assertFalse(f.runtime.health.value.cellularReady)
+            assertTrue(f.runtime.settings.takeover)
+        }
+
+    @Test fun destructionCancelsQueuedRestorationWithoutChangingTheRoleWhenCallsEnd(): Unit =
+        Fixture(enabled = true, holder = "gateway").use { f ->
+            f.connect()
+            `when`(f.runtime.cellular.hasCalls).thenReturn(true)
+            f.runtime.setTakeover(false)
+            f.drain()
+            assertTrue(f.runtime.health.value.takeoverOffPending)
+            f.runtime.onForegroundStopped(f.serviceToken)
+            f.drain()
+            `when`(f.runtime.cellular.hasCalls).thenReturn(false)
+            f.callsChanged(CallSnapshot())
+            f.drain()
+            verify(f.helper, never()).restoreDefaultDialer(anyString())
+            assertFalse(f.runtime.health.value.takeover)
+            assertTrue(f.runtime.health.value.holdsDialer)
+            assertEquals(1, f.endpoints.constructed().size)
+        }
+
+    @Test fun oldServiceCannotStopReplacementAndExplicitRestartRecreatesResources(): Unit =
+        Fixture(enabled = true).use { f ->
+            f.connect()
+            val old = f.serviceToken
+            f.serviceToken = Any()
+            f.runtime.onServiceCreated(f.serviceToken)
+            f.runtime.onForegroundStopped(old)
+            f.drain()
+            verify(f.endpoints.constructed().single(), never()).stop(anyLong(), anyBoolean())
+            f.promote()
+            f.runtime.onForegroundStopped(f.serviceToken)
+            f.drain()
+            f.promote()
+            assertEquals(2, f.endpoints.constructed().size)
+            verify(f.endpoints.constructed().last()).start()
+            verify(f.connector, times(2)).start()
+        }
+
+    @Test fun switchOffDuringCallKeepsResourcesUntilCallEnds(): Unit = Fixture(enabled = true).use { f ->
+        f.connect()
+        `when`(f.runtime.cellular.hasCalls).thenReturn(true)
+        f.runtime.setTakeover(false)
+        f.drain()
+        assertTrue(f.runtime.health.value.takeoverOffPending)
+        verify(f.endpoints.constructed().single(), never()).stop(anyLong(), anyBoolean())
+        `when`(f.runtime.cellular.hasCalls).thenReturn(false)
+        f.callsChanged(CallSnapshot())
+        f.drain()
+        verify(f.endpoints.constructed().single()).stop(releaseTransport = true)
+        verify(f.bridges.constructed().single()).stop()
+        assertFalse(f.runtime.health.value.takeover)
+        assertFalse(f.runtime.health.value.takeoverOffPending)
+    }
+
+    private class Fixture(enabled: Boolean = false, var holder: String? = "phone", rejectLaunch: Boolean = false) : AutoCloseable {
         private val scopes = mutableListOf<AutoCloseable>()
         private val workerScopes = mutableListOf<AutoCloseable>()
-        private lateinit var connector: ShizukuConnector
+        lateinit var connector: ShizukuConnector
+            private set
+        lateinit var endpoints: MockedConstruction<PjsipEndpoint>
+            private set
+        lateinit var bridges: MockedConstruction<CallBridge>
+            private set
+        lateinit var callsChanged: (CallSnapshot) -> Unit
+            private set
         private var listener: ShizukuConnector.Listener? = null
         private var helperState = ShizukuConnector.State.STOPPED
-        var holder: String? = "phone"
+        val context = mock(Context::class.java)
+        val network = mock(ConnectivityManager::class.java)
         val helper = mock(IPrivilegedService::class.java)
         val runtime: GatewayRuntime
         private val worker: ScheduledThreadPoolExecutor
+        var serviceToken = Any()
 
         init {
-            val context = mock(Context::class.java)
             val telecom = mock(TelecomManager::class.java)
             val role = mock(RoleManager::class.java)
             `when`(context.applicationContext).thenReturn(context)
@@ -106,22 +227,31 @@ class GatewayRuntimeLifecycleTest {
             `when`(context.packageManager).thenReturn(mock(PackageManager::class.java))
             `when`(context.getSystemService(TelecomManager::class.java)).thenReturn(telecom)
             `when`(context.getSystemService(RoleManager::class.java)).thenReturn(role)
-            `when`(context.getSystemService(ConnectivityManager::class.java)).thenReturn(mock(ConnectivityManager::class.java))
+            `when`(context.getSystemService(ConnectivityManager::class.java)).thenReturn(network)
             `when`(telecom.defaultDialerPackage).thenAnswer { holder }
             `when`(role.isRoleAvailable(RoleManager.ROLE_DIALER)).thenReturn(true)
+            if (rejectLaunch) doThrow(IllegalStateException("background launch denied")).`when`(context)
+                .startForegroundService(any(Intent::class.java))
             `when`(helper.dialerState()).thenAnswer { result(DialerRoleResult.STATE) }
             `when`(helper.becomeDefaultDialer(anyString())).thenAnswer {
                 holder = "gateway"
                 result(DialerRoleResult.SUCCESS)
             }
+            `when`(helper.restoreDefaultDialer(anyString())).thenAnswer {
+                holder = it.getArgument<String>(0).ifEmpty { "phone" }
+                result(DialerRoleResult.SUCCESS)
+            }
             `when`(helper.setupCallAccess(anyString(), anyBoolean(), anyInt())).thenReturn(mock(Bundle::class.java))
             scopes += mockConstruction(SettingsStore::class.java) { store, _ ->
-                `when`(store.load()).thenReturn(GatewaySettings(takeover = enabled, callAccess = CallAccess.DIALER))
+                `when`(store.load()).thenReturn(GatewaySettings(takeover = enabled, callAccess = CallAccess.DIALER,
+                    server = "pbx.invalid", username = "test", password = "test"))
             }
             scopes += mockConstruction(DialerHandoffStore::class.java) { store, _ ->
                 `when`(store.save(any(PreviousDialer::class.java) ?: PreviousDialer(0, ""))).thenReturn(true)
             }
-            scopes += mockConstruction(CellularEndpoint::class.java)
+            scopes += mockConstruction(CellularEndpoint::class.java) { endpoint, _ ->
+                doAnswer { callsChanged = it.getArgument(0); null }.`when`(endpoint).onCallsChanged = any()
+            }
             scopes += mockConstruction(ShizukuConnector::class.java) { mock, _ ->
                 connector = mock
                 `when`(mock.state).thenAnswer { helperState }
@@ -146,6 +276,11 @@ class GatewayRuntimeLifecycleTest {
                 workerScopes += mockConstruction(ComponentName::class.java)
                 workerScopes += mockConstruction(Intent::class.java)
                 workerScopes += mockConstruction(ConnectivityManager.NetworkCallback::class.java)
+                endpoints = mockConstruction(PjsipEndpoint::class.java) { endpoint, construction ->
+                    `when`(endpoint.config).thenReturn(construction.arguments()[0] as PjsipConfig)
+                    `when`(endpoint.status).thenReturn(EndpointStatus(false, "test endpoint"))
+                }.also { workerScopes += it }
+                bridges = mockConstruction(CallBridge::class.java).also { workerScopes += it }
             }.get(3, TimeUnit.SECONDS)
             runtime.start()
             drain()
@@ -161,7 +296,13 @@ class GatewayRuntimeLifecycleTest {
             helperState = state
             listener?.onChanged(state, connector.service)
         }
+        fun promote() {
+            runtime.onServiceCreated(serviceToken)
+            runtime.onForegroundStarted(serviceToken)
+            drain()
+        }
         fun connect() {
+            promote()
             transition(ShizukuConnector.State.CONNECTED)
             drain()
         }
@@ -173,7 +314,7 @@ class GatewayRuntimeLifecycleTest {
             } while (pending)
         }
         override fun close() {
-            runtime.setTakeover(false)
+            runtime.onForegroundStopped(serviceToken)
             drain()
             worker.submit { workerScopes.asReversed().forEach { it.close() } }.get(3, TimeUnit.SECONDS)
             worker.shutdownNow()
