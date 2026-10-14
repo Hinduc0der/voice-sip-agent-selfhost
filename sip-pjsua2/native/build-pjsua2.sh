@@ -126,9 +126,10 @@ for ABI in "${ABI_LIST[@]}"; do
     cd "$SSL_BUILD"
     export PATH="$LLVM_BIN:$PATH"
     export AR="$LLVM_BIN/llvm-ar" RANLIB="$LLVM_BIN/llvm-ranlib"
-    perl "$WORK/openssl-$OSSL_VERSION/Configure" "$OSSL_TARGET" -D__ANDROID_API__="$API" \
+    perl "$WORK/openssl-$OSSL_VERSION/Configure" "$OSSL_TARGET" \
       no-shared no-tests no-apps no-docs no-engine no-comp no-weak-ssl-ciphers no-legacy\
-      no-quic no-sm2 no-sm3 no-sm4 \
+      no-quic no-srp no-filenames no-autoload-config\
+      no-sm2 no-sm3 no-sm4 no-aria no-camellia no-ml-dsa no-slh-dsa no-ml-kem no-ec2m no-dsa\
       --prefix="$SSL_PREFIX" --openssldir=/nonexistent --libdir=lib $NATIVE_CFLAGS
     make -j"$JOBS" build_libs
     make install_dev
@@ -183,7 +184,6 @@ for ABI in "${ABI_LIST[@]}"; do
       --disable-libyuv --disable-libwebrtc --disable-android-mediacodec \
       --disable-gsm-codec --disable-ilbc-codec --disable-speex-codec --disable-g722-codec \
       --disable-g7221-codec --disable-l16-codec --disable-speex-aec
-    make dep
     grep -q "PJ_HAS_SSL_SOCK 1" pjlib/include/pj/compat/os_auto.h || { echo "SSL not enabled" >&2; exit 1; }
     grep -q "PJMEDIA_HAS_OPUS_CODEC 1" pjmedia/include/pjmedia-codec/config_auto.h || { echo "Opus not enabled" >&2; exit 1; }
     grep -q "PJMEDIA_HAS_G722_CODEC 0" pjmedia/include/pjmedia-codec/config_auto.h || { echo "G.722 not disabled" >&2; exit 1; }
