@@ -63,7 +63,20 @@ class SipUserAgent(
     private var stopping = false
 
     private val account get() = config.account
-    internal val aor: String get() = "sip:${account.username}@${account.domain}"
+    // Identity used when we originate (device-in-itself mode has no configured account).
+    private val localUser get() = account.username.ifBlank { "gateway" }
+    private val localDomain get() = account.domain.ifBlank { localIp }
+    internal val aor: String get() = "sip:$localUser@$localDomain"
+
+    // ---- Server (device-in-itself) mode: learned from the single registered softphone ----
+    internal val isServerMode get() = config.serverMode
+    private var peerAor: String? = null
+    @Volatile private var peerContactUri: String? = null
+    private var peerExpiry: ScheduledFuture<*>? = null
+    /** Full SIP URI (sip:user@ip:port) to reach the registered phone, or null if none. */
+    internal fun serverPeerUri(): String? = peerContactUri
+    /** Domain to use in locally generated URIs (our LAN IP when no account domain is set). */
+    internal val selfDomain: String get() = localDomain
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -73,10 +86,16 @@ class SipUserAgent(
         stopping = false
         transport = SipTransport(config.localPort, log) { msg, from -> post { onMessage(msg, from) } }
         transport.start()
-        resolve()
-        log.info("started on $localIp:$localPort -> ${account.server}:${account.port}")
+        if (config.serverMode) {
+            resolveLocal()
+            log.info("server mode on $localIp:$localPort; waiting for a phone to register")
+            setStatus(false, "waiting for phone to register")
+        } else {
+            resolve()
+            log.info("started on $localIp:$localPort -> ${account.server}:${account.port}")
+            register()
+        }
         executor.scheduleWithFixedDelay({ checkMedia() }, 5, 5, TimeUnit.SECONDS)
-        register()
     }
 
     /** Unregisters, hangs up all calls and releases sockets. Blocks up to [timeoutMs]. */
@@ -87,7 +106,8 @@ class SipUserAgent(
             stopping = true
             calls.values.toList().forEach { it.hangup(HangupCause.NORMAL) }
             regRefresh?.cancel(false)
-            sendRegister(0, null) { done.countDown() }
+            peerExpiry?.cancel(false)
+            if (config.serverMode) done.countDown() else sendRegister(0, null) { done.countDown() }
         }
         done.await(timeoutMs, TimeUnit.MILLISECONDS)
         post {
@@ -101,6 +121,7 @@ class SipUserAgent(
     /** Call when the network changes: refreshes our address and re-registers. */
     fun refreshRegistration() = post {
         if (!started || stopping) return@post
+        if (config.serverMode) { resolveLocal(); return@post }  // the phone re-registers itself
         resolve()
         register()
     }
@@ -121,6 +142,25 @@ class SipUserAgent(
         val call = SipCall(this, LegDirection.OUTBOUND, Party(target), target, newCallId(), newTag())
         post { call.startOutbound(target, caller) }
         return call
+    }
+
+    /**
+     * Server mode: deliver an incoming SMS to the registered phone as an out-of-dialog SIP MESSAGE
+     * (shown as a chat message in the softphone). Returns false if no phone is currently registered.
+     */
+    fun sendMessage(fromNumber: String?, text: String): Boolean {
+        val peer = peerContactUri ?: return false
+        post {
+            val fromUser = fromNumber ?: "sms"
+            val from = NameAddr(fromNumber, "sip:$fromUser@$localDomain").withTag(newTag())
+            val to = NameAddr(null, peer)
+            val req = newRequest("MESSAGE", peer, from, to, newCallId(), 1)
+            req.headers.add("Content-Type", "text/plain;charset=UTF-8")
+            req.body = text.toByteArray(Charsets.UTF_8)
+            sendClient(req) { /* delivery response ignored; best-effort */ }
+            log.info("SMS from ${redactNumber(fromNumber)} relayed to phone")
+        }
+        return true
     }
 
     // ---------------------------------------------------------------- registration
@@ -216,7 +256,7 @@ class SipUserAgent(
     // ---------------------------------------------------------------- message dispatch
 
     private fun onMessage(msg: SipMessage, from: InetSocketAddress) {
-        if (config.acceptOnlyFromServer && from.address != serverAddr.address) {
+        if (!config.serverMode && config.acceptOnlyFromServer && from.address != serverAddr.address) {
             log.warn("dropping SIP from untrusted ${from.address.hostAddress}")
             return
         }
@@ -244,6 +284,10 @@ class SipUserAgent(
         if (req.method == "ACK") {
             serverTxs[txKey(req.topVia?.branch, "INVITE")]?.onAck()
             calls[req.callId]?.onAck(req)
+            return
+        }
+        if (config.serverMode && req.method == "REGISTER") {
+            onRegister(req, from)
             return
         }
         serverTxs[txKey(req.topVia?.branch, req.method)]?.let {
@@ -297,6 +341,43 @@ class SipUserAgent(
         handler.onIncomingCall(call)
     }
 
+    /** Registrar for device-in-itself mode: remember where the single softphone can be reached. */
+    private fun onRegister(req: SipRequest, from: InetSocketAddress) {
+        val contactHeader = req.headers["Contact"]
+        val aorUser = req.from?.sipUri?.user ?: req.to?.sipUri?.user
+        val contactNa = contactHeader?.let { NameAddr.parse(it) }
+        val expires = contactNa?.params?.get("expires")?.toIntOrNull()
+            ?: req.headers["Expires"]?.trim()?.toIntOrNull() ?: 3600
+        val deregister = expires <= 0 || contactHeader == null || contactHeader.contains("*")
+        // Grant a short lease so the phone refreshes often; the registrar then recovers within
+        // one refresh interval after any restart, rather than waiting out the phone's full expiry.
+        val granted = if (deregister) 0 else minOf(if (expires <= 0) REG_LEASE_SEC else expires, REG_LEASE_SEC)
+        if (deregister) {
+            peerExpiry?.cancel(false)
+            peerAor = null; peerContactUri = null
+            setStatus(false, "phone unregistered")
+            log.info("phone unregistered (${redactNumber(aorUser)})")
+        } else {
+            val cUser = contactNa?.let { SipUri.parse(it.uri)?.user } ?: aorUser ?: "phone"
+            // Reach the phone at the address the REGISTER actually came from (NAT/roaming friendly).
+            peerAor = aorUser
+            peerContactUri = "sip:$cUser@${from.address.hostAddress}:${from.port}"
+            serverAddr = from
+            peerExpiry?.cancel(false)
+            peerExpiry = schedule(granted.toLong() * 1000 + 15_000) {
+                peerAor = null; peerContactUri = null
+                setStatus(false, "phone registration expired")
+                log.info("phone registration expired")
+            }
+            setStatus(true, "phone registered: ${redactNumber(aorUser)}")
+            log.info("phone registered: $aorUser @ ${from.address.hostAddress}:${from.port} lease=${granted}s")
+        }
+        val resp = buildResponse(req, 200, toTag = newTag())
+        if (contactHeader != null) resp.headers.add("Contact", "$contactHeader;expires=$granted")
+        resp.headers.add("Expires", granted.toString())
+        transport.send(resp, from)
+    }
+
     // ---------------------------------------------------------------- helpers used by SipCall
 
     internal fun post(block: () -> Unit) {
@@ -345,7 +426,7 @@ class SipUserAgent(
         calls[call.callId] = call
     }
 
-    internal fun contactUri(): String = "sip:${account.username}@$localIp:$localPort"
+    internal fun contactUri(): String = "sip:$localUser@$localIp:$localPort"
 
     internal fun newRequest(
         method: String,
@@ -404,6 +485,12 @@ class SipUserAgent(
         localIp = (localAddressProvider?.invoke(server) ?: routeTo(server))?.hostAddress ?: "0.0.0.0"
     }
 
+    /** Server mode has no upstream server; just learn our own LAN address. */
+    private fun resolveLocal() {
+        val probe = runCatching { InetAddress.getByName("8.8.8.8") }.getOrNull()
+        localIp = (probe?.let { localAddressProvider?.invoke(it) ?: routeTo(it) })?.hostAddress ?: "0.0.0.0"
+    }
+
     /** The local address the OS would use to reach [dest]. */
     private fun routeTo(dest: InetAddress): InetAddress? = try {
         DatagramSocket().use { s ->
@@ -421,5 +508,7 @@ class SipUserAgent(
 
     companion object {
         const val ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, NOTIFY, UPDATE"
+        /** Lease granted to a registering phone in server mode; short so restarts self-heal fast. */
+        private const val REG_LEASE_SEC = 120
     }
 }

@@ -82,8 +82,15 @@ internal class SipCall(
     fun startOutbound(target: String, caller: Party) {
         val acct = config.account
         val display = caller.displayName ?: caller.number ?: acct.displayName
-        localUri = NameAddr(display, ua.aor)
-        remoteUri = NameAddr(null, "sip:$target@${acct.domain}")
+        if (ua.isServerMode) {
+            // Device-in-itself: send straight to the registered phone; show the caller's number in From.
+            val fromUser = caller.number ?: "gateway"
+            localUri = NameAddr(display, "sip:$fromUser@${ua.selfDomain}")
+            remoteUri = NameAddr(null, ua.serverPeerUri() ?: "sip:$target@${ua.selfDomain}")
+        } else {
+            localUri = NameAddr(display, ua.aor)
+            remoteUri = NameAddr(null, "sip:$target@${acct.domain}")
+        }
         remoteTarget = remoteUri.uri
         ua.registerCall(this)
         try {
@@ -112,7 +119,10 @@ internal class SipCall(
         val req = ua.newRequest("INVITE", remoteTarget, localUri.withTag(localTag), remoteUri, callId, ++localCseq)
         req.headers.add("Contact", "<${ua.contactUri()}>")
         ua.addCapabilities(req)
-        callerForRetry?.number?.let { req.headers.add("P-Asserted-Identity", "<sip:$it@${config.account.domain}>") }
+        callerForRetry?.number?.let {
+            val d = config.account.domain.ifBlank { ua.selfDomain }
+            req.headers.add("P-Asserted-Identity", "<sip:$it@$d>")
+        }
         auth?.let { req.headers.add(it.first, it.second) }
         req.headers.add("Content-Type", "application/sdp")
         req.body = localSdp(config.codecs.map { it.payloadType to it }, Sdp.DEFAULT_TE_PT, "sendrecv").toByteArray()

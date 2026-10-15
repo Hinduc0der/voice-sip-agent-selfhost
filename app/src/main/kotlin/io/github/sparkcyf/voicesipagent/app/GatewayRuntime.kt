@@ -21,11 +21,6 @@ import io.github.sparkcyf.voicesipagent.privileged.CallAccess
 import io.github.sparkcyf.voicesipagent.privileged.DialerRoleResult
 import io.github.sparkcyf.voicesipagent.privileged.CallAccessRequirements
 import io.github.sparkcyf.voicesipagent.privileged.ShizukuConnector
-import io.github.sparkcyf.voicesipagent.pjsua2.PjsipConfig
-import io.github.sparkcyf.voicesipagent.pjsua2.PjsipEndpoint
-import io.github.sparkcyf.voicesipagent.pjsua2.PjsipLog
-import io.github.sparkcyf.voicesipagent.pjsua2.SipTransport
-import io.github.sparkcyf.voicesipagent.pjsua2.SrtpPolicy
 import io.github.sparkcyf.voicesipagent.sip.SipAccount
 import io.github.sparkcyf.voicesipagent.sip.SipConfig
 import io.github.sparkcyf.voicesipagent.sip.SipLog
@@ -110,14 +105,14 @@ class GatewayRuntime private constructor(context: Context) {
     val dialerMessage: StateFlow<String> = _dialerMessage
 
     val shizuku = ShizukuConnector(app) { AppLog.i(it) }
-    private fun audioFormat() = if (settings.sipStack == SipStack.PJSUA2)
-        PcmFormat.WIDEBAND else PcmFormat.NARROWBAND
+    // Built-in Kotlin SIP stack is G.711 (narrowband) only.
+    private fun audioFormat() = PcmFormat.NARROWBAND
 
     val cellular = CellularEndpoint(app,
         PrivilegedAudioOpener(shizuku, { settings.audioMethod }, { settings.muteEarpiece }, ::audioFormat),
         logger = { AppLog.i(it) },
     )
-    /** [SipUserAgent] or [PjsipEndpoint], per [GatewaySettings.sipStack]. */
+    /** Built-in SIP user agent. */
     private var sip: CallEndpoint? = null
     private var bridge: CallBridge? = null
     private var echo: EchoEndpoint? = null
@@ -166,11 +161,6 @@ class GatewayRuntime private constructor(context: Context) {
         override fun info(msg: String) = AppLog.i("sip: $msg")
         override fun warn(msg: String, t: Throwable?) = AppLog.w("sip: $msg", t)
     }
-    private val pjLog = object : PjsipLog {
-        override fun info(msg: String) = AppLog.i("sip: $msg")
-        override fun warn(msg: String, t: Throwable?) = AppLog.w("sip: $msg", t)
-    }
-
     fun start() = worker.execute {
         if (started) return@execute
         started = true
@@ -538,52 +528,33 @@ class GatewayRuntime private constructor(context: Context) {
             _health.update { it.copy(sip = EndpointStatus(false, "unknown srtp ${s.srtp}")) }
             return
         }
-        PjsipEndpoint.setVerboseLogging(s.sipDebugLog)
-        if (transport == null || (s.sipStack == SipStack.BUILTIN && transport != SipTransport.UDP)) {
-            AppLog.w("SIP transport '${s.sipTransport}' not supported by the ${s.sipStack.id} stack")
-            _health.update { it.copy(sip = EndpointStatus(false, "transport ${s.sipTransport} unsupported by ${s.sipStack.id}")) }
+        if (transport == null || transport != SipTransport.UDP) {
+            AppLog.w("SIP transport '${s.sipTransport}' not supported by the built-in stack (UDP only)")
+            _health.update { it.copy(sip = EndpointStatus(false, "transport ${s.sipTransport} unsupported (UDP only)")) }
             return
         }
         try {
-            val ep: CallEndpoint = when (s.sipStack) {
-                SipStack.BUILTIN -> SipUserAgent(
-                    SipConfig(
-                        account = SipAccount(
-                            server = s.server,
-                            port = s.port,
-                            username = s.username,
-                            password = s.password,
-                            domain = s.domain.ifBlank { s.server },
-                            displayName = "gateway",
-                        ),
-                        localPort = s.localSipPort,
-                    ),
-                    sipLog,
-                ).also { ua ->
-                    ua.addStatusListener { ep, st -> sipStatus(ep, st) }
-                    ua.start()
-                }
-                SipStack.PJSUA2 -> PjsipEndpoint(
-                    PjsipConfig(
+            val ep: CallEndpoint = SipUserAgent(
+                SipConfig(
+                    account = SipAccount(
                         server = s.server,
                         port = s.port,
-                        transport = transport,
-                        srtp = srtp,
                         username = s.username,
                         password = s.password,
                         domain = s.domain.ifBlank { s.server },
                         displayName = "gateway",
-                        localPort = s.localSipPort,
                     ),
-                    pjLog,
-                ).also { pj ->
-                    pj.addStatusListener { ep, st -> sipStatus(ep, st) }
-                    pj.start()
-                }
+                    localPort = s.localSipPort,
+                    serverMode = s.serverMode,
+                ),
+                sipLog,
+            ).also { ua ->
+                ua.addStatusListener { ep, st -> sipStatus(ep, st) }
+                ua.start()
             }
             sip = ep
             _health.update { it.copy(sip = ep.status) }
-            AppLog.i("SIP stack: ${s.sipStack.id}")
+            AppLog.i("SIP stack: built-in${if (s.serverMode) " (server mode)" else ""}")
         } catch (e: Throwable) {
             AppLog.w("SIP start failed", e)
             _health.update { it.copy(sip = EndpointStatus(false, "start failed: ${e.message}")) }
@@ -593,29 +564,11 @@ class GatewayRuntime private constructor(context: Context) {
     private fun stopSip(releaseLibrary: Boolean = false) {
         val previous = sip
         sip = null
-        try {
-            when (val s = previous) {
-                is SipUserAgent -> s.stop()
-                is PjsipEndpoint -> {
-                    // Keep the SIP socket only if pjsua2 is about to take it over again.
-                    val n = settings
-                    s.stop(
-                        releaseTransport = releaseLibrary || !(n.takeover && n.sipStack == SipStack.PJSUA2 &&
-                            n.localSipPort == s.config.localPort && SipTransport.of(n.sipTransport) == s.config.transport),
-                    )
-                }
-            }
-        } finally {
-            if (releaseLibrary || !_health.value.takeover || settings.sipStack != SipStack.PJSUA2)
-                PjsipEndpoint.stopLibrary()
-        }
+        (previous as? SipUserAgent)?.stop()
     }
 
     private fun refreshSipRegistration() {
-        when (val s = sip) {
-            is SipUserAgent -> s.refreshRegistration()
-            is PjsipEndpoint -> s.refreshRegistration()
-        }
+        (sip as? SipUserAgent)?.refreshRegistration()
     }
 
     private fun watchNetwork() {
@@ -668,7 +621,9 @@ class GatewayRuntime private constructor(context: Context) {
             AppLog.i("bridge idle: SIP not configured")
             return
         }
-        val inboundTarget = s.inboundTarget.ifBlank { s.username }
+        // In server mode the SIP side dials whichever phone is registered, so the target only has
+        // to be non-empty; "phone" is a readable placeholder when no DID/username is configured.
+        val inboundTarget = s.inboundTarget.ifBlank { s.username.ifBlank { if (s.serverMode) "phone" else "" } }
         val b = CallBridge(
             sideA = cellular,
             sideB = sideB,
@@ -719,7 +674,6 @@ class GatewayRuntime private constructor(context: Context) {
         val platformOnly = old.copy(audioMethod = new.audioMethod, callAccess = new.callAccess,
             muteEarpiece = new.muteEarpiece, sipDebugLog = new.sipDebugLog,
             keepDefaultDialer = new.keepDefaultDialer) == new
-        PjsipEndpoint.setVerboseLogging(new.sipDebugLog)
         if (!platformOnly) { startSip(); rebuildBridge() }
         configureCallAccess()
         runSetup()
@@ -729,7 +683,6 @@ class GatewayRuntime private constructor(context: Context) {
     /** pjsip info-level logging; takes effect immediately, persisted for the next start. */
     fun setSipDebugLog(on: Boolean) = worker.execute {
         settingsStore.save(settings.copy(sipDebugLog = on).also { _settings.value = it })
-        PjsipEndpoint.setVerboseLogging(on)
         AppLog.i("SIP debug log ${if (on) "on" else "off"}")
     }
 
@@ -807,7 +760,7 @@ class GatewayRuntime private constructor(context: Context) {
                 "keepDefaultDialer=${settings.keepDefaultDialer} muteEarpiece=${settings.muteEarpiece}")
             appendLine("shizuku=${h.shizuku} (${h.shizukuDetail})")
             appendLine("privileged=${h.privileged} ${h.privilegedDetail}")
-            appendLine("sip=${h.sip.detail} ready=${h.sip.ready} stack=${settings.sipStack.id} " +
+            appendLine("sip=${h.sip.detail} ready=${h.sip.ready} stack=builtin " +
                 "transport=${settings.sipTransport} srtp=${settings.srtp} debugLog=${settings.sipDebugLog}")
             appendLine("cellular=${cellular.status.detail} inCallServiceBound=${CellularEndpoint.isInCallServiceBound} " +
                 "service=${CellularEndpoint.boundServiceDescription ?: "none"}")
@@ -817,6 +770,16 @@ class GatewayRuntime private constructor(context: Context) {
             appendLine("calls=${h.calls.summary} settingsPending=${h.settingsPending}")
             appendLine("loopback=${h.loopbackTest} session=${h.session}")
             shizuku.service?.let { appendLine("tap=${runCatching { it.audioStats() }.getOrDefault("?")}") }
+        }
+    }
+
+    /** Forward an incoming cellular SMS to the registered phone (server mode) as a SIP MESSAGE. */
+    fun forwardSms(from: String?, text: String) = worker.execute {
+        val s = sip
+        if (s is SipUserAgent && s.sendMessage(from, text)) {
+            AppLog.i("SMS forwarded to the registered phone")
+        } else {
+            AppLog.w("SMS not forwarded: no phone registered")
         }
     }
 

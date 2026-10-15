@@ -30,6 +30,12 @@ data class SipConfig(
     val ringTimeoutMs: Long = 60_000,
     /** Only accept SIP/RTP from the registrar's address (LAN deployment). */
     val acceptOnlyFromServer: Boolean = true,
+    /**
+     * Device-in-itself mode: act as the SIP registrar. Instead of registering outward to a PBX,
+     * accept REGISTER from a single softphone and route cellular calls to its registered contact.
+     * When on, [acceptOnlyFromServer] is ignored (the peer address is learned from REGISTER).
+     */
+    val serverMode: Boolean = false,
 )
 
 /** Minimal logging hook so the stack stays free of platform dependencies. */

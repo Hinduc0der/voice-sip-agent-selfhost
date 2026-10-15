@@ -40,12 +40,19 @@ data class GatewaySettings(
     val audioMethod: Int = AudioMethod.AUTO,
     val callAccess: Int = CallAccess.AUTO,
     /** Which SIP implementation backs the PBX side. */
-    val sipStack: SipStack = SipStack.PJSUA2,
+    val sipStack: SipStack = SipStack.BUILTIN,
+    /**
+     * Device-in-itself mode: this phone hosts the SIP registrar. A softphone (e.g. Linphone
+     * in the field) registers directly to it; no external PBX/server is involved. When on,
+     * [server]/[username]/[password] are not required.
+     */
+    val serverMode: Boolean = true,
 ) {
-    val sipConfigured: Boolean get() = server.isNotBlank() && username.isNotBlank() && password.isNotEmpty()
+    val sipConfigured: Boolean get() =
+        serverMode || (server.isNotBlank() && username.isNotBlank() && password.isNotEmpty())
 
     override fun toString() =
-        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece stack=$sipStack server=$server:$port/$sipTransport srtp=$srtp user=$username target=$inboundTarget)"
+        "GatewaySettings(takeover=$takeover muteEarpiece=$muteEarpiece stack=$sipStack serverMode=$serverMode server=$server:$port/$sipTransport srtp=$srtp user=$username target=$inboundTarget)"
 }
 
 enum class SipStack(val id: String) {
@@ -83,7 +90,8 @@ class SettingsStore(context: Context) {
         busyPolicy = runCatching { BusyPolicy.valueOf(prefs.getString("busy_policy", "REJECT")!!) }.getOrDefault(BusyPolicy.REJECT),
         audioMethod = prefs.getInt("audio_method", AudioMethod.AUTO).takeIf { it in 0..2 } ?: AudioMethod.AUTO,
         callAccess = prefs.getInt("call_access", CallAccess.AUTO).takeIf { it in 0..2 } ?: CallAccess.AUTO,
-        sipStack = SipStack.of(prefs.getString("sip_stack", null)) ?: SipStack.PJSUA2,
+        sipStack = SipStack.of(prefs.getString("sip_stack", null)) ?: SipStack.BUILTIN,
+        serverMode = prefs.getBoolean("server_mode", true),
     )
 
     fun save(s: GatewaySettings) {
@@ -106,6 +114,7 @@ class SettingsStore(context: Context) {
             .putInt("audio_method", s.audioMethod)
             .putInt("call_access", s.callAccess)
             .putString("sip_stack", s.sipStack.id)
+            .putBoolean("server_mode", s.serverMode)
             .apply()
     }
 

@@ -29,5 +29,4 @@ include(":gateway")
 // Android modules
 include(":telephony")
 include(":privileged")
-include(":sip-pjsua2")
 include(":app")

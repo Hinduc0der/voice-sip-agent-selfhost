@@ -24,6 +24,8 @@ class AdbControlReceiver : BroadcastReceiver() {
             "loopback" -> rt.setLoopbackTest(intent.getBooleanExtra("on", true))
             "takeover" -> rt.setTakeover(intent.getBooleanExtra("on", true))
             "earpiece-mute" -> rt.setMuteEarpiece(intent.getBooleanExtra("on", true))
+            "sms-test" -> rt.forwardSms(intent.getStringExtra("from") ?: "+10000000000",
+                intent.getStringExtra("text") ?: "test message from the gateway")
             "sip-debug" -> rt.setSipDebugLog(intent.getBooleanExtra("on", true))
             "sip-stack" -> {
                 val stack = SipStack.of(intent.getStringExtra("stack"))
