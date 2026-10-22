@@ -32,6 +32,8 @@ data class GatewaySettings(
     val password: String = "",
     val domain: String = "",
     val localSipPort: Int = 5062,
+    /** Server mode: lease (seconds) granted to the softphone; longer survives background Doze. */
+    val registrarLeaseSec: Int = 600,
     /** SIP extension / DID that receives cellular inbound calls; blank = the SIP username (trunk DID). */
     val inboundTarget: String = "",
     /** Comma-separated; empty = any number may be dialed out. */
@@ -47,6 +49,8 @@ data class GatewaySettings(
      * [server]/[username]/[password] are not required.
      */
     val serverMode: Boolean = true,
+    /** UI language: "ru" or "en". Pure UI preference, no SIP restart. */
+    val uiLanguage: String = "ru",
 ) {
     val sipConfigured: Boolean get() =
         serverMode || (server.isNotBlank() && username.isNotBlank() && password.isNotEmpty())
@@ -85,6 +89,7 @@ class SettingsStore(context: Context) {
         password = prefs.getString("password_sealed", null)?.let(::unseal).orEmpty(),
         domain = prefs.getString("domain", "")!!,
         localSipPort = prefs.getInt("local_sip_port", 5062),
+        registrarLeaseSec = prefs.getInt("registrar_lease_sec", 600).takeIf { it in 30..86400 } ?: 600,
         inboundTarget = prefs.getString("inbound_target", "")!!,
         allowedPrefixes = prefs.getString("allowed_prefixes", "")!!,
         busyPolicy = runCatching { BusyPolicy.valueOf(prefs.getString("busy_policy", "REJECT")!!) }.getOrDefault(BusyPolicy.REJECT),
@@ -92,6 +97,7 @@ class SettingsStore(context: Context) {
         callAccess = prefs.getInt("call_access", CallAccess.AUTO).takeIf { it in 0..2 } ?: CallAccess.AUTO,
         sipStack = SipStack.of(prefs.getString("sip_stack", null)) ?: SipStack.BUILTIN,
         serverMode = prefs.getBoolean("server_mode", true),
+        uiLanguage = prefs.getString("ui_lang", "ru")!!,
     )
 
     fun save(s: GatewaySettings) {
@@ -108,6 +114,7 @@ class SettingsStore(context: Context) {
             .putString("password_sealed", seal(s.password))
             .putString("domain", s.domain.trim())
             .putInt("local_sip_port", s.localSipPort)
+            .putInt("registrar_lease_sec", s.registrarLeaseSec)
             .putString("inbound_target", s.inboundTarget.trim())
             .putString("allowed_prefixes", s.allowedPrefixes.trim())
             .putString("busy_policy", s.busyPolicy.name)
@@ -115,6 +122,7 @@ class SettingsStore(context: Context) {
             .putInt("call_access", s.callAccess)
             .putString("sip_stack", s.sipStack.id)
             .putBoolean("server_mode", s.serverMode)
+            .putString("ui_lang", s.uiLanguage)
             .apply()
     }
 

@@ -349,9 +349,11 @@ class SipUserAgent(
         val expires = contactNa?.params?.get("expires")?.toIntOrNull()
             ?: req.headers["Expires"]?.trim()?.toIntOrNull() ?: 3600
         val deregister = expires <= 0 || contactHeader == null || contactHeader.contains("*")
-        // Grant a short lease so the phone refreshes often; the registrar then recovers within
-        // one refresh interval after any restart, rather than waiting out the phone's full expiry.
-        val granted = if (deregister) 0 else minOf(if (expires <= 0) REG_LEASE_SEC else expires, REG_LEASE_SEC)
+        val lease = config.registrarLeaseSec.coerceIn(30, 86_400)
+        // Grant a generous lease so the phone refreshes at ~half of it; brief background Doze on the
+        // softphone no longer drops the registration. We advertise [lease] but keep the last contact
+        // for about twice that (holdMs) before giving up, so a few missed refreshes still ring through.
+        val granted = if (deregister) 0 else minOf(if (expires <= 0) lease else expires, lease)
         if (deregister) {
             peerExpiry?.cancel(false)
             peerAor = null; peerContactUri = null
@@ -364,13 +366,14 @@ class SipUserAgent(
             peerContactUri = "sip:$cUser@${from.address.hostAddress}:${from.port}"
             serverAddr = from
             peerExpiry?.cancel(false)
-            peerExpiry = schedule(granted.toLong() * 1000 + 15_000) {
+            val holdMs = granted.toLong() * 2 * 1000 + 30_000
+            peerExpiry = schedule(holdMs) {
                 peerAor = null; peerContactUri = null
                 setStatus(false, "phone registration expired")
-                log.info("phone registration expired")
+                log.info("phone registration expired (no refresh for ${holdMs / 1000}s)")
             }
             setStatus(true, "phone registered: ${redactNumber(aorUser)}")
-            log.info("phone registered: $aorUser @ ${from.address.hostAddress}:${from.port} lease=${granted}s")
+            log.info("phone registered: $aorUser @ ${from.address.hostAddress}:${from.port} lease=${granted}s hold=${holdMs / 1000}s")
         }
         val resp = buildResponse(req, 200, toTag = newTag())
         if (contactHeader != null) resp.headers.add("Contact", "$contactHeader;expires=$granted")
@@ -508,7 +511,5 @@ class SipUserAgent(
 
     companion object {
         const val ALLOW = "INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, NOTIFY, UPDATE"
-        /** Lease granted to a registering phone in server mode; short so restarts self-heal fast. */
-        private const val REG_LEASE_SEC = 120
     }
 }

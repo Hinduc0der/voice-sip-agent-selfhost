@@ -546,6 +546,7 @@ class GatewayRuntime private constructor(context: Context) {
                     ),
                     localPort = s.localSipPort,
                     serverMode = s.serverMode,
+                    registrarLeaseSec = s.registrarLeaseSec,
                 ),
                 sipLog,
             ).also { ua ->
@@ -690,6 +691,12 @@ class GatewayRuntime private constructor(context: Context) {
     fun setMuteEarpiece(on: Boolean) = worker.execute {
         settingsStore.save(settings.copy(muteEarpiece = on).also { _settings.value = it })
         AppLog.i("earpiece mute ${if (on) "on" else "off"} (from next call)")
+    }
+
+    /** UI-only preference; never touches SIP or the bridge. */
+    fun setUiLanguage(lang: String) = worker.execute {
+        if (lang == settings.uiLanguage) return@execute
+        settingsStore.save(settings.copy(uiLanguage = lang).also { _settings.value = it })
     }
 
     /** Changes the next switch-off, without touching the current call or any queued handoff. */

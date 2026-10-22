@@ -36,6 +36,12 @@ data class SipConfig(
      * When on, [acceptOnlyFromServer] is ignored (the peer address is learned from REGISTER).
      */
     val serverMode: Boolean = false,
+    /**
+     * Server mode: lease (seconds) granted to the softphone's REGISTER. The phone refreshes at
+     * roughly half this, so a longer value survives background Doze on the softphone. We hold the
+     * last contact for about twice this before giving up, tolerating a few missed refreshes.
+     */
+    val registrarLeaseSec: Int = 600,
 )
 
 /** Minimal logging hook so the stack stays free of platform dependencies. */
