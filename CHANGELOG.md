@@ -4,6 +4,16 @@
 [sparkcyf/android-voice-sip-agent](https://github.com/sparkcyf/android-voice-sip-agent).
 Полная история — в `git log`.
 
+## 0.2.0-selfhost4 — 22.10.2026 (versionCode 103)
+- **Фикс глубокого сна (Doze).** Служба-шлюз держит partial wakelock (`voicesipagent:gateway`),
+  пока включён takeover — CPU не засыпает вместе с телефоном, и поток SIP-сокета продолжает
+  отвечать на REGISTER. Без этого на агрессивных прошивках (ZTE/Nubia, Xiaomi, Transsion) телефон
+  уходил в Doze, пакеты REGISTER копились непрочитанными в приёмной очереди сокета, и регистрация
+  софтфона молча отваливалась до следующего пробуждения. Белый список Doze не помогал: он снимает
+  сетевые/алармовые лимиты, но не держит CPU.
+- Проверено на Nubia NX769J: wakelock держится (`dumpsys power`), Doze включён, шлюз жив; до фикса
+  в Doze приёмная очередь `:5062` набирала ~230 КБ непрочитанных REGISTER.
+
 ## selfhost — текущее
 
 - **Настраиваемая аренда регистрации** (`registrarLeaseSec`, по умолчанию 600 с) вместо жёстких

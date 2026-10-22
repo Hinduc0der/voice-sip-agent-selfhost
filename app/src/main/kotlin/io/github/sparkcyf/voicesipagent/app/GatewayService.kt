@@ -12,6 +12,7 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import android.os.Build
+import android.os.PowerManager
 import android.telecom.TelecomManager
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +32,13 @@ class GatewayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var statusJob: Job? = null
     private var foreground = false
+    // Held while the gateway runs in the foreground, so Doze on an aggressive OEM (ZTE/Nubia,
+    // Xiaomi, Transsion…) cannot suspend the SIP reader thread.  Without it the socket backs up
+    // and the softphone's registration silently drops until the phone next wakes — the battery
+    // allowlist does not help, because it lifts network/alarm limits but does not keep the CPU
+    // scheduled.  The gateway sits on a charger in this role, so keeping the CPU awake is the
+    // intended trade-off.
+    private var wakeLock: PowerManager.WakeLock? = null
     private val runtimeToken = Any()
     private val roleReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -85,6 +93,7 @@ class GatewayService : Service() {
             startForeground(NOTIFICATION_ID, build(summary(health)))
         }
         foreground = true
+        acquireWakeLock()
     }
 
     private fun stopGateway(startId: Int? = null) {
@@ -92,6 +101,7 @@ class GatewayService : Service() {
         statusJob = null
         stopForeground(STOP_FOREGROUND_REMOVE)
         foreground = false
+        releaseWakeLock()
         if (startId == null) stopSelf() else stopSelf(startId)
     }
 
@@ -102,7 +112,23 @@ class GatewayService : Service() {
         unregisterReceiver(roleReceiver)
         scope.cancel()
         stopForeground(STOP_FOREGROUND_REMOVE)
+        releaseWakeLock()
         super.onDestroy()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(PowerManager::class.java)
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "voicesipagent:gateway").apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+        AppLog.i("gateway wakelock acquired")
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
     }
 
     private fun summary(h: HealthState): String = when {
