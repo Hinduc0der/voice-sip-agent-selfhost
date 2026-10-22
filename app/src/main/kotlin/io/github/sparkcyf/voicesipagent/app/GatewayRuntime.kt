@@ -547,6 +547,7 @@ class GatewayRuntime private constructor(context: Context) {
                     localPort = s.localSipPort,
                     serverMode = s.serverMode,
                     registrarLeaseSec = s.registrarLeaseSec,
+                    registrarPassword = s.registrarPassword,
                 ),
                 sipLog,
             ).also { ua ->

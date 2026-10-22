@@ -42,6 +42,16 @@ data class SipConfig(
      * last contact for about twice this before giving up, tolerating a few missed refreshes.
      */
     val registrarLeaseSec: Int = 600,
+    /**
+     * Server mode: password the softphone must present to REGISTER (SIP digest auth, RFC 3261).
+     * Empty disables authentication — anyone who can reach the port may register and place calls
+     * through the SIM, so leave it empty only on a trusted LAN. When set, an unauthenticated
+     * REGISTER is answered with 401 and a challenge; the phone replies with its digest response.
+     * The username is taken from the phone's own REGISTER (shared secret, single phone).
+     */
+    val registrarPassword: String = "",
+    /** Server mode: realm advertised in the auth challenge. */
+    val registrarRealm: String = "voice-sip-agent",
 )
 
 /** Minimal logging hook so the stack stays free of platform dependencies. */

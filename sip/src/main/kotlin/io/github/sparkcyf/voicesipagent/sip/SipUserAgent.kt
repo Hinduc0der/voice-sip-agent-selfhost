@@ -62,6 +62,11 @@ class SipUserAgent(
     private var started = false
     private var stopping = false
 
+    // Registrar auth (server mode). All touched only from the single sip-ua executor thread.
+    private val issuedNonces = HashMap<String, Long>()          // nonce -> issuedAt (ms)
+    private val authFailTimes = HashMap<String, ArrayDeque<Long>>() // source IP -> recent failure times
+    private val authBanUntil = HashMap<String, Long>()          // source IP -> banned until (ms)
+
     private val account get() = config.account
     // Identity used when we originate (device-in-itself mode has no configured account).
     private val localUser get() = account.username.ifBlank { "gateway" }
@@ -341,8 +346,75 @@ class SipUserAgent(
         handler.onIncomingCall(call)
     }
 
+    // Registrar auth tuning: how long an issued nonce is accepted, and the brute-force ban policy.
+    private val nonceTtlMs = 300_000L
+    private val authMaxFails = 5          // failures within the window before a ban
+    private val authFailWindowMs = 60_000L
+    private val authBanMs = 600_000L      // 10 minutes
+
+    /**
+     * Challenge/verify a REGISTER when a registrar password is set. Returns true to let the REGISTER
+     * through, false when it was handled here (401 sent, or silently dropped as banned/over-limit).
+     */
+    private fun registrarAuthPassed(req: SipRequest, from: InetSocketAddress): Boolean {
+        if (config.registrarPassword.isEmpty()) return true
+        val ip = from.address?.hostAddress ?: ""
+        val now = System.currentTimeMillis()
+        authBanUntil[ip]?.let { until ->
+            if (now < until) {
+                log.warn("REGISTER from banned $ip dropped (${(until - now) / 1000}s left)")
+                return false
+            }
+            authBanUntil.remove(ip); authFailTimes.remove(ip)
+        }
+        val authHeader = req.headers["Authorization"]
+        val cred = authHeader?.let { DigestAuth.parseCredentials(it) }
+        val ok = cred != null && DigestAuth.verify(cred, "REGISTER", config.registrarPassword) { nonce ->
+            val issuedAt = issuedNonces[nonce]
+            issuedAt != null && now - issuedAt <= nonceTtlMs
+        }
+        if (ok) {
+            authFailTimes.remove(ip); authBanUntil.remove(ip)
+            return true
+        }
+        // A credential-bearing REGISTER that failed counts toward the ban; a first, challenge-less
+        // REGISTER does not (that is the normal start of the handshake).
+        if (authHeader != null && registrarAuthFailed(ip, now)) {
+            log.warn("REGISTER brute-force from $ip: banned for ${authBanMs / 1000}s")
+            return false
+        }
+        val nonce = issueNonce(now)
+        val resp = buildResponse(req, 401, toTag = newTag())
+        resp.headers.add("WWW-Authenticate", DigestAuth.challengeHeader(config.registrarRealm, nonce))
+        transport.send(resp, from)
+        log.info("REGISTER challenged (${if (authHeader == null) "no credentials" else "bad credentials"}) from $ip")
+        return false
+    }
+
+    /** Record a failed auth from [ip]; returns true once the window is over the limit (now banned). */
+    private fun registrarAuthFailed(ip: String, now: Long): Boolean {
+        val times = authFailTimes.getOrPut(ip) { ArrayDeque() }
+        times.addLast(now)
+        while (times.isNotEmpty() && now - times.first() > authFailWindowMs) times.removeFirst()
+        if (times.size >= authMaxFails) {
+            authBanUntil[ip] = now + authBanMs
+            authFailTimes.remove(ip)
+            return true
+        }
+        return false
+    }
+
+    /** Issue a fresh nonce, pruning expired ones so the map cannot grow without bound. */
+    private fun issueNonce(now: Long): String {
+        issuedNonces.entries.removeAll { now - it.value > nonceTtlMs }
+        val nonce = DigestAuth.newNonce()
+        issuedNonces[nonce] = now
+        return nonce
+    }
+
     /** Registrar for device-in-itself mode: remember where the single softphone can be reached. */
     private fun onRegister(req: SipRequest, from: InetSocketAddress) {
+        if (!registrarAuthPassed(req, from)) return
         val contactHeader = req.headers["Contact"]
         val aorUser = req.from?.sipUri?.user ?: req.to?.sipUri?.user
         val contactNa = contactHeader?.let { NameAddr.parse(it) }

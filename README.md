@@ -12,8 +12,7 @@
 - **For users:** [`docs/КАК-НАСТРОИТЬ.md`](docs/КАК-НАСТРОИТЬ.md) - the single page that's enough
   to set everything up from scratch (Russian).
 - **Reference:** [app settings](docs/settings-ru.md) · [baresip client](docs/client-baresip.md) ·
-  [Shizuku after a reboot](docs/shizuku-reboot.md) · [internet and security](docs/internet-security.md)
-  (VPN as a fallback - [`docs/vpn-wireguard.md`](docs/vpn-wireguard.md)).
+  [Shizuku after a reboot](docs/shizuku-reboot.md) · [internet and security](docs/internet-security.md).
 - **For developers:** [building the APK](#building-the-apk).
 
 A fairly recent old Android phone with your SIM sits at home on a charger and Wi-Fi. The incoming
@@ -77,7 +76,7 @@ Verified on a **Nubia NX769J (Android 16)** paired with the baresip client:
   the registration while asleep, even on aggressive OEM ROMs (0.2.0-selfhost4).
 
 Not done yet: outgoing calls/SMS from the far phone over the gateway's SIM; wideband audio
-(currently G.711). Working outside a single Wi-Fi needs a public IP/VPN (see below).
+(currently G.711). Working outside a single Wi-Fi needs a public IP (see below).
 
 > ⚠ **The capture method depends on the phone model.** On the Nubia it's "Direct telephony"; the
 > automatic mode chose wrong (no audio). Another phone may need "Call redirection". How to tell -
@@ -239,18 +238,18 @@ after-reboot start remains.)
 ## Going to the internet, and security
 
 In one Wi-Fi it just works. To reach the gateway "from the road" it must be reachable from the
-internet. **The main path is direct access:** a public IP at home plus forwarding of the SIP port
-and RTP (**1:1, same port numbers**). **The fallback is a VPN** (WireGuard) if there is no public
-IP or you don't want to expose SIP; the gateway phone can be its own VPN server (no root).
+internet. **The path is direct access:** a public IP at home plus forwarding of the SIP port and
+RTP (**1:1, same port numbers**), with the gateway itself closed off by the registrar password.
 
-> ⛔ In registrar mode there is **no authentication yet** (empty password) - an open SIP port is a
-> toll-fraud risk. A password on REGISTER/INVITE and automatic source banning (like Asterisk +
-> fail2ban) are **planned but not implemented yet**; until then an **IP allow-list** on the router
-> (or a VPN) is required. A non-standard port is camouflage, not protection.
+> ⛔ An open SIP port is a toll-fraud risk. The gateway is protected by a **SIP registrar password**
+> (digest authentication, RFC 2617/3261, MD5): a missing or wrong password is rejected with 401, and
+> **brute-force protection** bans an IP for 10 minutes after 5 failed attempts in 60 seconds. The
+> password is stored in the Android Keystore (AES-GCM, realm `voice-sip-agent`). An **empty password
+> disables authentication** (local network only) - for the internet a password is mandatory. A
+> non-standard port is camouflage, not protection; **no VPN is needed.**
 
-Full step-by-step (direct access, security, VPN as a fallback) -
-[`docs/internet-security.md`](docs/internet-security.md); VPN with screenshots and configs -
-[`docs/vpn-wireguard.md`](docs/vpn-wireguard.md) (Russian).
+Full step-by-step (direct access, the registrar password, security) -
+[`docs/internet-security.md`](docs/internet-security.md) (Russian).
 
 ---
 
@@ -289,7 +288,8 @@ export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot"
 - Outgoing calls/SMS from the far phone over the gateway's SIM - **not done**.
 - **The internet path is not yet tested live** - a single Wi-Fi only.
 - **Without root, Shizuku does not survive a reboot** - the main operational risk (above).
-- An open `:5062` with no auth is the main production risk.
+- **Registrar authentication is implemented** (SIP digest password + brute-force ban); for the
+  internet, set a password - an empty password leaves `:5062` open.
 
 ---
 

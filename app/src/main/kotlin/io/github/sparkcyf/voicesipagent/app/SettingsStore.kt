@@ -34,6 +34,12 @@ data class GatewaySettings(
     val localSipPort: Int = 5062,
     /** Server mode: lease (seconds) granted to the softphone; longer survives background Doze. */
     val registrarLeaseSec: Int = 600,
+    /**
+     * Server mode: password the softphone must present to REGISTER (SIP digest auth). Empty = no
+     * authentication (anyone who reaches the port can register and dial out) — set one before
+     * exposing the gateway to the internet. Sealed on disk like the upstream SIP password.
+     */
+    val registrarPassword: String = "",
     /** SIP extension / DID that receives cellular inbound calls; blank = the SIP username (trunk DID). */
     val inboundTarget: String = "",
     /** Comma-separated; empty = any number may be dialed out. */
@@ -94,6 +100,7 @@ class SettingsStore(context: Context) {
         domain = prefs.getString("domain", "")!!,
         localSipPort = prefs.getInt("local_sip_port", 5062),
         registrarLeaseSec = prefs.getInt("registrar_lease_sec", 600).takeIf { it in 30..86400 } ?: 600,
+        registrarPassword = prefs.getString("registrar_password_sealed", null)?.let(::unseal).orEmpty(),
         inboundTarget = prefs.getString("inbound_target", "")!!,
         allowedPrefixes = prefs.getString("allowed_prefixes", "")!!,
         busyPolicy = runCatching { BusyPolicy.valueOf(prefs.getString("busy_policy", "REJECT")!!) }.getOrDefault(BusyPolicy.REJECT),
@@ -121,6 +128,7 @@ class SettingsStore(context: Context) {
             .putString("domain", s.domain.trim())
             .putInt("local_sip_port", s.localSipPort)
             .putInt("registrar_lease_sec", s.registrarLeaseSec)
+            .putString("registrar_password_sealed", seal(s.registrarPassword))
             .putString("inbound_target", s.inboundTarget.trim())
             .putString("allowed_prefixes", s.allowedPrefixes.trim())
             .putString("busy_policy", s.busyPolicy.name)
