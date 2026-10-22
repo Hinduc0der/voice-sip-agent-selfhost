@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -43,9 +44,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.sparkcyf.voicesipagent.gateway.BusyPolicy
@@ -208,6 +211,30 @@ private fun Screen(rt: GatewayRuntime, modifier: Modifier, requestDialer: () -> 
             }
         }
         FaqSection()
+        DonateFooter()
+    }
+}
+
+/**
+ * Optional, voluntary donation link (DonationAlerts). The app stays free (GPL-2.0-or-later);
+ * this changes nothing.
+ */
+private const val DONATE_DA_URL = "https://www.donationalerts.com/r/hinducoder"
+
+@Composable
+private fun DonateFooter() {
+    val uri = LocalUriHandler.current
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            t("♡ Поддержать разработку (добровольно)", "♡ Support development (optional)"),
+            modifier = Modifier.clickable { runCatching { uri.openUri(DONATE_DA_URL) } },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            textDecoration = TextDecoration.Underline,
+        )
     }
 }
 

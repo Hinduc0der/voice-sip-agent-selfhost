@@ -86,7 +86,7 @@ Module dependencies: `:voice-api` ← `:sip`, `:gateway` (pure JVM, testable on 
   (CALL_COMPANION_APP + MANAGE_ONGOING_CALLS appop; setup also attempts `cmd telecom add-or-remove-call-companion-app`)
   or an explicitly selected default-dialer UI service. Audited stock API 30 requires default-dialer mode.
   API 31+ readiness uses the enabled non-UI service and MANAGE_ONGOING_CALLS; it does not require
-  a companion override or dialer role. See docs/ANDROID12_SOURCE_AUDIT.md and docs/ANDROID13_SOURCE_AUDIT.md.
+  a companion override or dialer role. See docs/dev/ANDROID12_SOURCE_AUDIT.md and docs/dev/ANDROID13_SOURCE_AUDIT.md.
   `CellularEndpoint` only handles calls it owns: gateway inbound calls and calls it dialed itself (matched on the
   last 8 digits). Calls the user dials manually and calls arriving while another call exists are left alone;
   emergency numbers are refused fail-closed. Once a call is ACTIVE it is `setMuted(true)` and the audio tap is

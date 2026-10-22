@@ -6,6 +6,9 @@ secrets/
 # Machine-specific agent notes (devices, PBX hosts)
 CLAUDE.local.md
 
+# Внутренние dev-доки (аудиты, планы совместимости) - не публикуются на GitHub
+docs/dev/
+
 # Gradle / Android
 .gradle/
 build/

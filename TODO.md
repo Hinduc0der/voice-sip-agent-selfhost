@@ -9,7 +9,7 @@ Follow-ups to the current gateway implementation. These items describe planned w
 - [ ] Restore the UI from current Telecom calls after service reconnection or process restart. Preserve system emergency-call handling and the switch-dialer recovery action.
 - [ ] Verify manual calling with SIP disconnected, Shizuku unavailable, and takeover off, including background and lock-screen behavior.
 
-See the [dialer scope and phased fallback](docs/ANDROID_COMPATIBILITY_PLAN.md#dialer-scope-and-phased-fallback) for included controls, ownership rules, validation, and excluded features. Implement this after verifying gateway audio on a physical device.
+See the [dialer scope and phased fallback](docs/dev/ANDROID_COMPATIBILITY_PLAN.md#dialer-scope-and-phased-fallback) for included controls, ownership rules, validation, and excluded features. Implement this after verifying gateway audio on a physical device.
 
 ## Dual SIM support
 
@@ -18,7 +18,7 @@ See the [dialer scope and phased fallback](docs/ANDROID_COMPATIBILITY_PLAN.md#di
 - [ ] Handle removed, disabled, or changed SIM/eSIM accounts with a clear unavailable state and explicit reselection.
 - [ ] Integrate account selection with manual dialer fallback and validate concurrent-call behavior across SIMs. Selecting two accounts does not imply support for two simultaneous audio bridges.
 
-See the [fallback account-selection requirements](docs/ANDROID_COMPATIBILITY_PLAN.md#dialer-scope-and-phased-fallback) and [call/audio ownership requirements](docs/ANDROID_COMPATIBILITY_PLAN.md#changes-needed-for-the-compatibility-port). The current [status](README.md#status) describes the single-call limit.
+See the [fallback account-selection requirements](docs/dev/ANDROID_COMPATIBILITY_PLAN.md#dialer-scope-and-phased-fallback) and [call/audio ownership requirements](docs/dev/ANDROID_COMPATIBILITY_PLAN.md#changes-needed-for-the-compatibility-port). The current [status](README.md#status) describes the single-call limit.
 
 ## Audio diagnostics
 
@@ -27,7 +27,7 @@ See the [fallback account-selection requirements](docs/ANDROID_COMPATIBILITY_PLA
 - [ ] Add a guided two-way audio check that separately verifies captured downlink, remote receipt of injected uplink, and handset mute/restoration. Successful construction, routing setters, and frame counters are not proof of remote delivery.
 - [ ] Keep diagnostics under Advanced settings and preserve privacy: no PCM recording, passwords, or unmasked phone numbers in diagnostic output.
 
-See [Advanced settings and diagnostics](docs/ANDROID_COMPATIBILITY_PLAN.md#settings-and-defaults), the [audio backend and routing checks](docs/ANDROID_COMPATIBILITY_PLAN.md#3-implement-the-older-cellular-audio-backend), and the [HAL error-visibility audit](docs/ANDROID11_SOURCE_AUDIT.md#hal-calls-and-observable-errors).
+See [Advanced settings and diagnostics](docs/dev/ANDROID_COMPATIBILITY_PLAN.md#settings-and-defaults), the [audio backend and routing checks](docs/dev/ANDROID_COMPATIBILITY_PLAN.md#3-implement-the-older-cellular-audio-backend), and the [HAL error-visibility audit](docs/dev/ANDROID11_SOURCE_AUDIT.md#hal-calls-and-observable-errors).
 
 ## Call waiting and hold
 
@@ -36,4 +36,4 @@ See [Advanced settings and diagnostics](docs/ANDROID_COMPATIBILITY_PLAN.md#setti
 - [ ] Implement SIP hold synchronization where supported, including hold music and resume without overlapping audio handles or changing the modem-driven clock.
 - [ ] Test remote and local hold, repeated hold/resume, call waiting, helper loss while held, and call/service termination during pending audio opens.
 
-See [call/audio ownership and cleanup](docs/ANDROID_COMPATIBILITY_PLAN.md#changes-needed-for-the-compatibility-port), the [fallback scope](docs/ANDROID_COMPATIBILITY_PLAN.md#dialer-scope-and-phased-fallback), which defers advanced hold/switching, and the [current validation gaps](README.md#status).
+See [call/audio ownership and cleanup](docs/dev/ANDROID_COMPATIBILITY_PLAN.md#changes-needed-for-the-compatibility-port), the [fallback scope](docs/dev/ANDROID_COMPATIBILITY_PLAN.md#dialer-scope-and-phased-fallback), which defers advanced hold/switching, and the [current validation gaps](README.md#status).
