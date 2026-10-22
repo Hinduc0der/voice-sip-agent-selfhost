@@ -1,281 +1,260 @@
-# voice-sip-agent-selfhost — телефон-шлюз «устройство в себе», без root (Android 13+)
+# voice-sip-agent-selfhost — a "device-in-itself" phone gateway, no root (Android 13+)
 
-> **English, in one paragraph.** This is a fork of
-> [sparkcyf/android-voice-sip-agent](https://github.com/sparkcyf/android-voice-sip-agent)
-> (GPL-2.0-or-later) that adds a **built-in SIP registrar** so the gateway needs **no
-> external PBX and no PC** — a softphone registers straight to the phone, and incoming GSM
-> calls and SMS are bridged to it over the internet. It runs on a **non-rooted, modern
-> Android 13+ phone** using the system call-audio interception path via **Shizuku**. The
-> rest of this document is in Russian, matching the project. The original project's README
-> is kept as [`README.upstream.md`](README.upstream.md) (and `README.zh.md`).
+> 🇷🇺 **[Русская версия →](README.ru.md)** (fuller, with the project's own notes) ·
+> 🇬🇧 English (this file). Original project READMEs: [`README.upstream.md`](README.upstream.md)
+> and `README.zh.md`.
 
-Старый (но относительно свежий) Android-телефон с SIM лежит дома на зарядке и Wi-Fi. Входящие
-голосовые вызовы и SMS, приходящие на его номер, он сам отдаёт через интернет на твой телефон —
-где бы ты ни был. **Ни ПК, ни Asterisk, ни внешнего сервера не нужно** — SIP-сервер встроен
-прямо в приложение. **Root не нужен.**
+A fairly recent old Android phone with your SIM sits at home on a charger and Wi-Fi. The incoming
+**voice calls and SMS** that arrive on its number are relayed to your phone over the internet —
+wherever you are. **No PC, no Asterisk, no external server:** the SIP server is built into the app.
+**No root required.**
 
 ```
-Звонящий ──GSM/VoLTE──► Телефон-шлюз (SIM + приложение)
-                             ├─ встроенный SIP-регистратор :5062 ◄─REGISTER─ софтфон (где угодно)
-                             ├─ сам снимает трубку, звук вызова ↔ SIP (RTP)
-                             └─ входящая SMS → SIP MESSAGE ──────► чат софтфона
+Caller ──GSM/VoLTE──► Gateway phone (SIM + app)
+                         ├─ built-in SIP registrar :5062 ◄─REGISTER─ softphone (anywhere)
+                         ├─ answers the call itself, call audio ↔ SIP (RTP)
+                         └─ incoming SMS → SIP MESSAGE ──────────► softphone chat
 ```
 
-Это **трек A** большого проекта «переадресация». Трек B (форк
-[gsm2sip](https://github.com/pulpoff/gsm2sip), **с root**, старые Qualcomm-трубки до Android 13,
-вроде Samsung S4 mini) — в отдельном репозитории `gsm2sip-selfhost`.
+This is **track A** of the larger "переадресация" project. Track B (a fork of
+[gsm2sip](https://github.com/pulpoff/gsm2sip), **with root**, old Qualcomm phones below
+Android 13, such as the Samsung S4 mini) lives in the separate `gsm2sip-selfhost` repository.
 
-Ключ к тому, что это возможно без root: начиная с **Android 13** в системе есть штатный, но
-скрытый механизм перехвата звука разговора (`TELEPHONY_TX`/`TELEPHONY_RX`). Доступ к нему даёт
-**Shizuku**, запускаемый один раз командой отладки.
-
----
-
-## Содержание
-
-- [Кому и зачем это нужно](#кому-и-зачем-это-нужно)
-- [Что уже работает](#что-уже-работает)
-- [Чем этот форк отличается от upstream](#чем-этот-форк-отличается-от-upstream)
-- [Требования к телефону-шлюзу](#требования-к-телефону-шлюзу)
-- [Какой телефон выбрать](#какой-телефон-выбрать)
-- [Установка на телефон-шлюз](#установка-на-телефон-шлюз)
-- [Настройки приложения](#настройки-приложения) → полный справочник в [`docs/settings-ru.md`](docs/settings-ru.md)
-- [Рекомендуемый клиент — baresip](#рекомендуемый-клиент--baresip) → подробно в [`docs/client-baresip.md`](docs/client-baresip.md)
-- [Shizuku после перезагрузки](#shizuku-после-перезагрузки) → подробно в [`docs/shizuku-reboot.md`](docs/shizuku-reboot.md)
-- [Вывод в интернет и безопасность](#вывод-в-интернет-и-безопасность) → подробно в [`docs/internet-security.md`](docs/internet-security.md)
-- [Диагностика (adb)](#диагностика-adb)
-- [Сборка APK](#сборка-apk)
-- [Честный статус и риски](#честный-статус-и-риски)
-- [Лицензия и благодарности](#лицензия-и-благодарности)
+The key to doing this without root: since **Android 13** the system has a standard but hidden
+call-audio interception mechanism (`TELEPHONY_TX`/`TELEPHONY_RX`). Access is granted by **Shizuku**,
+started once with a debugging command.
 
 ---
 
-## Кому и зачем это нужно
+## Who it's for
 
-Домашний номер (SIM) держит привязки к банкам, госуслугам, 2FA-кодам, звонкам родных и служб —
-возить его с собой неудобно и небезопасно. Шлюз оставляет SIM **дома**, а звонки и SMS с неё
-доставляет тебе через интернет на любой телефон, где бы ты ни был.
+Your home number (SIM) anchors your bank, government services, 2FA codes, and calls from family
+and services — carrying it around is both inconvenient and risky. This gateway keeps the SIM
+**at home** and delivers its calls and SMS to you over the internet, on any phone, wherever you are.
 
-- **Отпуск / командировка / поездка.** Без роуминга, без потери входящих на домашний номер, без
-  смены номера. В твоём телефоне в поездке — местная eSIM или вторая SIM только для интернета;
-  домашняя SIM лежит дома в шлюзе.
-- **Долгий переезд / жизнь за границей** (экспат, студент, вахта). Домашний номер остаётся «живым»
-  и привязанным к твоим аккаунтам, пока ты в другой стране: звонки из банка и SMS-коды приходят
-  как раньше.
-- **Безопасность на улице.** Украли или отобрали телефон в чужом городе — а домашней SIM в нём
-  **нет**, она дома. Вор не получит твой номер, не перехватит SMS-коды, не восстановит пароли по
-  SMS и не доберётся до привязанных к SIM аккаунтов и банка. В украденном аппарате — только
-  местная интернет-eSIM или «пустая» вторая SIM без важных привязок.
-- **Приватность и контроль.** «Устройство в себе»: SIP-сервер внутри самого телефона-шлюза, звук
-  и сообщения идут напрямую к твоему софтфону — без облаков и чужих серверов, ничего не уходит
-  третьей стороне.
+- **Vacation / business trip.** No roaming, no missed incoming on your home number, no changing
+  numbers. On the road your phone carries a local eSIM or a second SIM for data only; the home SIM
+  stays in the gateway at home.
+- **Long relocation / living abroad** (expat, student, rotational work). Your home number stays
+  "alive" and tied to your accounts while you are in another country: bank calls and SMS codes
+  arrive as before.
+- **Safety on the street.** If your phone is stolen or snatched in an unfamiliar city, the home SIM
+  **isn't in it** — it's at home. The thief gets no access to your number, can't intercept SMS
+  codes, can't reset passwords by SMS, and can't reach SIM-bound accounts or your bank. The stolen
+  phone holds only a local data eSIM or an "empty" second SIM with no important bindings.
+- **Privacy and control.** A "device-in-itself": the SIP server lives inside the gateway phone,
+  audio and messages go straight to your softphone — no clouds, no third-party servers.
 
-**Кому:** путешественникам и цифровым кочевникам, экспатам, вахтовикам, студентам за рубежом; всем,
-кто держит «якорный» номер для банков и госуслуг и не хочет возить его с собой; тем, кто ценит
-приватность (нет внешнего сервера).
+**For:** travelers and digital nomads, expats, rotational workers, students abroad; anyone who
+keeps an "anchor" number for banks and government services and doesn't want to carry it; and anyone
+who values privacy (no external server).
 
 ---
 
-## Что уже работает
+## What already works
 
-Проверено на **Nubia NX769J (Android 16)** и в связке с клиентом baresip:
+Verified on a **Nubia NX769J (Android 16)** paired with the baresip client:
 
-- ✅ Входящий GSM-вызов на SIM шлюза → звонит софтфон на другом телефоне, **звук в обе стороны**
-  (нужен метод захвата **«Direct telephony»** — см. [настройки](docs/settings-ru.md), раздел 4.4).
-- ✅ Встроенный SIP-регистратор: софтфон регистрируется прямо на телефон-шлюз.
-- ✅ Входящая **SMS** → приходит в чат софтфона.
-- ✅ Самовосстановление: после перезапуска приложения связь поднимается за ≤2 минуты.
-- ✅ Все настройки — **в самом приложении** (RU/EN), у каждого пункта есть ⓘ-пояснение.
-- ✅ Устойчивость к глубокому сну (Doze): служба держит wakelock, пока включён шлюз, поэтому
-  телефон не роняет регистрацию во сне даже на агрессивных прошивках (0.2.0-selfhost4).
+- ✅ Incoming GSM call to the gateway's SIM → the softphone rings on the other phone, **two-way
+  audio** (needs the **"Direct telephony"** capture method — see [settings](docs/settings-ru.md), §4.4).
+- ✅ Built-in SIP registrar: the softphone registers straight to the gateway phone.
+- ✅ Incoming **SMS** → arrives in the softphone chat.
+- ✅ Self-recovery: after the app restarts, the link comes back within ≤2 minutes.
+- ✅ All settings are **in the app itself** (RU/EN), each item has an ⓘ explanation.
+- ✅ Doze resilience: the service holds a wakelock while the gateway is on, so the phone doesn't drop
+  the registration while asleep, even on aggressive OEM ROMs (0.2.0-selfhost4).
 
-Пока **не** сделано: исходящие звонки/SMS с дальнего телефона через SIM шлюза; широкополосный
-звук (сейчас G.711). Интернет вне одной Wi-Fi — нужен белый IP/VPN (см. ниже).
+Not done yet: outgoing calls/SMS from the far phone over the gateway's SIM; wideband audio
+(currently G.711). Working outside a single Wi-Fi needs a public IP/VPN (see below).
 
-> ⚠ **Способ захвата звука зависит от модели.** На Nubia рабочий — «Direct telephony»;
-> автоматический режим выбирал неправильно (звук не шёл). На другом телефоне может понадобиться
-> «Call redirection». Как определить — [`docs/settings-ru.md`](docs/settings-ru.md), раздел 4.4.
+> ⚠ **The capture method depends on the phone model.** On the Nubia it's "Direct telephony"; the
+> automatic mode chose wrong (no audio). Another phone may need "Call redirection". How to tell —
+> [`docs/settings-ru.md`](docs/settings-ru.md), §4.4.
 >
-> ⚠ **Посторонний VPN на телефоне-шлюзе ломает регистрацию** — заворачивает SIP в туннель, и
-> софтфон виснет на подключении. Отключи любой VPN на телефоне-шлюзе.
+> ⚠ **A foreign VPN on the gateway phone breaks registration** — it wraps SIP into the tunnel and
+> the softphone hangs on connect. Turn off any VPN on the gateway phone.
 >
-> ⚠ **Без root Shizuku гаснет при перезагрузке телефона** — его надо поднимать заново. Это
-> главный эксплуатационный нюанс трека A, см. [раздел](#shizuku-после-перезагрузки).
+> ⚠ **Without root, Shizuku dies on a phone reboot** — it must be restarted. This is track A's main
+> operational caveat, see [the section below](#shizuku-after-a-reboot).
 
 ---
 
-## Чем этот форк отличается от upstream
+## How this fork differs from upstream
 
-Штатный [android-voice-sip-agent](https://github.com/sparkcyf/android-voice-sip-agent)
-регистрируется на **внешний** PBX. Наш форк добавляет:
+Stock [android-voice-sip-agent](https://github.com/sparkcyf/android-voice-sip-agent) registers to an
+**external** PBX. This fork adds:
 
-- режим **встроенного регистратора** («устройство в себе»): приложение само принимает REGISTER
-  на `:5062`, внешний PBX не нужен (включён по умолчанию);
-- **пересылку входящих SMS** в SIP (`MESSAGE`);
-- **настраиваемую аренду регистрации** (`registrarLeaseSec`, по умолчанию 600 с) с удержанием
-  последнего контакта ~2×аренды — короткие «засыпания» софтфона в фоне не роняют связь;
-- **русский/английский интерфейс** с ⓘ-пояснениями и разделом FAQ;
-- сборку **без нативного pjsip**: по умолчанию используется чисто-Kotlin SIP-стек
-  (**только UDP, кодек G.711**). Это важно и для [лицензий](#лицензия-и-благодарности): в
-  дефолтной сборке **нет** статически слинкованных pjsip/OpenSSL/libopus.
+- a **built-in registrar** ("device-in-itself"): the app accepts REGISTER on `:5062` itself, no
+  external PBX needed (on by default);
+- **forwarding of incoming SMS** to SIP (`MESSAGE`);
+- a **configurable registration lease** (`registrarLeaseSec`, default 600 s) with the last contact
+  held for ~2× the lease — brief background sleeps on the softphone don't drop the link;
+- a **Russian/English UI** with ⓘ explanations and an FAQ section;
+- a **wakelock** held while the gateway runs, so Doze on an aggressive ROM can't suspend the SIP
+  reader thread;
+- a build **without native pjsip**: by default a pure-Kotlin SIP stack is used (**UDP only, G.711
+  codec**). This also matters for [licensing](#license-and-credits): the default build statically
+  links **no** pjsip/OpenSSL/libopus.
 
 ---
 
-## Требования к телефону-шлюзу
+## Gateway phone requirements
 
-- **Android 13 или новее**, процессор **arm64**.
-- Чип **Qualcomm или MediaTek** с маршрутом звука вызова (проверяется одной командой, ниже).
-  **Exynos (Samsung)** и телефоны с операторским замком (Verizon и т.п.) — **не подходят**.
-- SIM с голосом; стабильный Wi-Fi; постоянная зарядка.
-- Отдельный аппарат без личных данных: живёт с включённой отладкой и Shizuku.
+- **Android 13 or newer**, **arm64** CPU.
+- A **Qualcomm or MediaTek** chip with a call-audio route (checked by one command, below).
+  **Exynos (Samsung)** and carrier-locked phones (Verizon, etc.) are **not** suitable.
+- A voice SIM; stable Wi-Fi; permanent charging.
+- A dedicated phone with no personal data: it lives with debugging and Shizuku enabled.
 
-### Проверка пригодности (без установки, по USB)
+### Suitability check (no install, over USB)
 
 ```bash
-adb shell getprop ro.build.version.release                 # нужно >= 13
-adb shell getprop ro.product.cpu.abi                       # нужно arm64-v8a
+adb shell getprop ro.build.version.release                 # need >= 13
+adb shell getprop ro.product.cpu.abi                       # need arm64-v8a
 adb shell "dumpsys media.audio_policy | grep -E 'TELEPHONY_TX|TELEPHONY_RX'"
 ```
-Если в последней команде есть обе строки — телефон кандидат. Окончательно подтверждает само
-приложение (`pstn_interceptable=true`) и живой звонок.
+If the last command shows both lines — the phone is a candidate. Final confirmation comes from the
+app (`pstn_interceptable=true`) and a live call.
 
 ---
 
-## Какой телефон выбрать
+## Which phone to pick
 
-- Android 13+ (почти любой аппарат 2023 года и новее), **arm64**, чип **Qualcomm (Snapdragon)**
-  или **MediaTek (Dimensity/Helio)**.
-- **НЕ** Exynos (Samsung) и **НЕ** планшетные/«Go»-чипы без телефонии.
-- Без операторского замка (SIM-free / «международная» версия).
-- Чем дешевле, тем лучше — это выделенный «дежурный» аппарат на зарядке.
+- Android 13+ (almost any phone from 2023 on), **arm64**, **Qualcomm (Snapdragon)** or
+  **MediaTek (Dimensity/Helio)**.
+- **NOT** Exynos (Samsung) and **NOT** tablet/"Go" chips without telephony.
+- No carrier lock (SIM-free / "international" version).
+- The cheaper the better — it's a dedicated "duty" phone on a charger.
 
-Если готов рутовать аппарат — root снимает единственный недостаток трека A (см.
-[Shizuku](#shizuku-после-перезагрузки)): на рутованном телефоне Shizuku поднимается сам после
-перезагрузки. Тогда хорошо рутуются Pixel, Xiaomi/Redmi/POCO, Motorola, OnePlus, Nothing; плохо
-— Samsung, операторские аппараты, многие Transsion.
+If you're willing to root the phone, root removes track A's only drawback (see
+[Shizuku](#shizuku-after-a-reboot)): on a rooted phone Shizuku starts itself after a reboot. Phones
+that root well: Pixel, Xiaomi/Redmi/POCO, Motorola, OnePlus, Nothing; poorly — Samsung, carrier
+units, many Transsion.
 
-**Сортировщик трубок** — `triage/check-phone.sh` в большом проекте: `bash check-phone.sh` по USB
-даёт «КАНДИДАТ/МИМО», рабочий метод звука, состояние загрузчика и рекомендованный трек (A/B).
+**Triage script** — `triage/check-phone.sh` in the larger project: `bash check-phone.sh` over USB
+gives "CANDIDATE/NOPE", the working audio method, bootloader state, and the recommended track (A/B).
 
 ---
 
-## Установка на телефон-шлюз
+## Installing on the gateway phone
 
-1. Включить «Для разработчиков» → «Отладка по USB», подключить к ПК, разрешить отладку.
-2. Поставить **Shizuku** (на MediaTek/Xiaomi/Android 16 — патченый, обычный там падает):
+1. Enable Developer options → USB debugging, connect to a PC, allow debugging.
+2. Install **Shizuku** (patched one on MediaTek/Xiaomi/Android 16, where the normal build crashes):
    ```bash
    adb install shizuku.apk
    ```
-3. Поставить приложение шлюза:
+3. Install the gateway app:
    ```bash
    adb install voice-sip-agent-selfhost.apk
    ```
-4. Запустить Shizuku (**повторять после каждой перезагрузки телефона**, см.
-   [раздел](#shizuku-после-перезагрузки)):
+4. Start Shizuku (**repeat after every phone reboot**, see [the section](#shizuku-after-a-reboot)):
    ```bash
    P=$(adb shell pm path moe.shizuku.privileged.api | sed 's/package://;s/base.apk//' | tr -d '\r')
    adb shell "${P}lib/arm64/libshizuku.so"
    ```
-   Без ПК Shizuku запускается через «Беспроводную отладку» прямо на телефоне.
-5. Открыть приложение → **Grant Shizuku** → «Разрешить всегда».
-6. Выдать разрешения (приложение их само просит; через adb):
+   Without a PC, Shizuku starts via "Wireless debugging" on the phone itself.
+5. Open the app → **Grant Shizuku** → "Always allow".
+6. Grant permissions (the app asks itself; via adb):
    ```bash
    adb shell pm grant io.github.sparkcyf.voicesipagent android.permission.READ_PHONE_NUMBERS
    adb shell pm grant io.github.sparkcyf.voicesipagent android.permission.RECEIVE_SMS
    ```
-7. **Режим сервера включён по умолчанию.** Узнать IP телефона-шлюза:
+7. **Server mode is on by default.** Find the gateway's IP:
    ```bash
    adb shell "ip -4 addr show wlan0 | grep -o 'inet [0-9.]*'"
    ```
-   Порт — **5062/UDP** (по умолчанию).
-8. **Отключить оптимизацию батареи** для приложения и Shizuku (особенно ZTE/Nubia/Xiaomi),
-   иначе прошивка убьёт процесс.
+   The port is **5062/UDP** (default).
+8. **Turn off battery optimization** for the app and Shizuku (especially ZTE/Nubia/Xiaomi), or the
+   ROM will kill the process.
 
 ---
 
-## Настройки приложения
+## App settings
 
-Всё настраивается **прямо в приложении** (переключатель РУ/EN вверху, у каждого пункта — ⓘ).
-Единственный параметр, реально отличающийся от телефона к телефону, — **способ захвата звука
-(«Cellular audio»)**: если звонок соединяется, но люди не слышат друг друга — переключай именно
-его.
+Everything is configured **in the app** (RU/EN toggle at the top, an ⓘ on each item). The only
+value that really differs from phone to phone is the **capture method ("Cellular audio")**: if the
+call connects but people can't hear each other, flip exactly that.
 
-![Главный экран](docs/images/ru-01b-registered.png)
+![Main screen](docs/images/ru-01b-registered.png)
 
-**Полный справочник всех настроек со скриншотами** — [`docs/settings-ru.md`](docs/settings-ru.md).
+**The full settings reference with screenshots** — [`docs/settings-ru.md`](docs/settings-ru.md)
+(Russian).
 
-Кратко для режима «устройство в себе»:
+Short version for "device-in-itself" mode:
 
-| Пункт | Значение |
+| Item | Value |
 |---|---|
-| Device-in-itself mode (встроенный SIP-сервер) | **Вкл** (по умолчанию) — поля PBX можно не трогать |
+| Device-in-itself mode (built-in SIP server) | **on** (default) — PBX fields can stay empty |
 | Local SIP port | **5062** |
-| Registration lease | **600** с (увеличить до 1200, если регистрация протухает) |
-| Cellular audio | **Direct telephony** на Nubia; иначе пробуй Call redirection (раздел 4.4) |
+| Registration lease | **600 s** (raise to 1200 if registration keeps expiring) |
+| Cellular audio | **Direct telephony** on the Nubia; otherwise try Call redirection (§4.4) |
 
 ---
 
-## Рекомендуемый клиент — baresip
+## Recommended client — baresip
 
-На дальнем телефоне нужен SIP-софтфон. **Рекомендуем [baresip](https://f-droid.org/packages/com.tutpro.baresip/)**
-(`com.tutpro.baresip`, F-Droid): бесплатный libre-клиент, держит несколько аккаунтов и всегда
-умеет page-mode `MESSAGE` (это важно для SMS; **Linphone 6.2.x исходящие SMS не отправляет**).
+The far phone needs a SIP softphone. We recommend
+**[baresip](https://f-droid.org/packages/com.tutpro.baresip/)** (`com.tutpro.baresip`, F-Droid): a
+free libre client that holds several accounts and always sends page-mode `MESSAGE` (important for
+SMS; **Linphone 6.2.x won't send outgoing SMS**).
 
-Быстрая настройка: ⋮ → «Профили» → `sip:s23@<IP-шлюза>:5062` → «+» → включить «Регистрация».
-Пароль/прокси не нужны. **Порт `:5062` обязателен прямо в AoR** — иначе всё уйдёт на `:5060`.
+Quick setup: ⋮ → "Accounts" → `sip:s23@<gateway-IP>:5062` → "+" → enable "Register". No
+password/proxy needed. **The `:5062` port is mandatory right in the AoR**, or everything goes to
+`:5060`.
 
-Полная инструкция (две SIM — один софтфон, ответы на SMS, альтернативы) —
-[`docs/client-baresip.md`](docs/client-baresip.md).
-
----
-
-## Shizuku после перезагрузки
-
-Механизм перехвата звука требует прав уровня отладки (Shizuku). **На не-root телефоне Shizuku
-гаснет при каждой перезагрузке** — и шлюз перестаёт работать, пока Shizuku не поднят заново
-(провод или беспроводная отладка). Для роли «лежит дома, пока я в поездке» это главный риск.
-
-- **Рут решает штатно:** в Shizuku включается «Запускать при загрузке» (**только с root**) —
-  поднимается сам после включения, без ПК. Плюс автозапуск самого приложения и снятая
-  оптимизация батареи → **полностью необслуживаемый шлюз**.
-- **Без рута:** либо не перезагружать телефон, либо держать рядом маленький постоянный ПК/SBC,
-  который по USB/Wi-Fi-adb выполняет команду запуска при загрузке.
-
-Команды, пути и диагностика — [`docs/shizuku-reboot.md`](docs/shizuku-reboot.md).
+Full client guide (two SIMs → one softphone, SMS replies, alternatives) —
+[`docs/client-baresip.md`](docs/client-baresip.md) (Russian).
 
 ---
 
-## Вывод в интернет и безопасность
+## Shizuku after a reboot
 
-Пока шлюз и телефон в одной Wi-Fi — всё работает. Для «из поездки» нужен **белый IP + проброс
-`5062/UDP` и RTP**, либо **VPN** (WireGuard/Tailscale) на обоих телефонах — тогда пробросы не
-нужны.
+The call-audio interception needs debugging-level rights (Shizuku). **On a non-root phone Shizuku
+dies on every reboot** — and the gateway stops working until Shizuku is restarted (cable or wireless
+debugging). For the "sits at home while I travel" role this is the main risk.
 
-> ⛔ В режиме регистратора **аутентификации нет** (пароль пустой). Открытый в интернет `5062` —
-> toll-fraud риск. **Рекомендуется VPN**, а не проброс. Подробно и пошагово —
-> [`docs/internet-security.md`](docs/internet-security.md).
+- **Root solves it cleanly:** Shizuku's "Start on boot" (**root only**) brings it up right after
+  power-on, no PC. Plus app auto-start and a battery exemption → a **fully unattended gateway**.
+- **Without root:** either don't reboot the phone, or keep a small always-on PC/SBC nearby that runs
+  the start command over USB/Wi-Fi-adb at boot.
+
+Commands, paths and diagnostics — [`docs/shizuku-reboot.md`](docs/shizuku-reboot.md) (Russian).
+(Deep sleep *while running* is already handled by the wakelock since 0.2.0-selfhost4; only the
+after-reboot start remains.)
 
 ---
 
-## Диагностика (adb)
+## Going to the internet, and security
+
+In one Wi-Fi it just works. For "from the road" you need a **public IP + forwarding of `5062/UDP`
+and RTP**, or a **VPN** (WireGuard/Tailscale) on both phones — then no forwarding is needed.
+
+> ⛔ In registrar mode there is **no authentication** (empty password). An open `:5062` on the
+> internet is a toll-fraud risk. **A VPN is recommended** over forwarding. Step by step —
+> [`docs/internet-security.md`](docs/internet-security.md) (Russian).
+
+---
+
+## Diagnostics (adb)
 
 ```bash
 R=io.github.sparkcyf.voicesipagent/io.github.sparkcyf.voicesipagent.app.AdbControlReceiver
-adb shell am broadcast -n $R --es op status                       # сводка состояния в лог
-adb shell am broadcast -n $R --es op sms-test --es from "+700..." --es text "привет"  # тест SMS
-adb shell am broadcast -n $R --es op takeover --ez on false       # выключить шлюз
-adb logcat -s VoiceSipAgent VsaTap VsaPrivileged                  # журнал шлюза
+adb shell am broadcast -n $R --es op status                       # state summary to the log
+adb shell am broadcast -n $R --es op sms-test --es from "+700..." --es text "hi"  # SMS test
+adb shell am broadcast -n $R --es op takeover --ez on false       # turn the gateway off
+adb logcat -s VoiceSipAgent VsaTap VsaPrivileged                  # gateway log
 ```
-В журнале звонка главное: `both legs connected` и `media bridged` — звук соединён;
-`levels downPeak/upPeak` ненулевые с обеих сторон = слышно в обе стороны (`upPeak=0` — обычно не
-выдан микрофон софтфону). Все adb-команды настроек — в [`docs/settings-ru.md`](docs/settings-ru.md), раздел 7.
+In a call log the key lines: `both legs connected` and `media bridged` — audio joined; nonzero
+`levels downPeak/upPeak` on both sides = heard both ways (`upPeak=0` usually means the softphone
+wasn't granted the mic). All settings-over-adb are in
+[`docs/settings-ru.md`](docs/settings-ru.md), §7.
 
 ---
 
-## Сборка APK
+## Building the APK
 
-Нужны **JDK 17** и Android SDK. pjsip/swig **не нужны** — форк собирается на чисто-Kotlin
-SIP-стеке.
+JDK 17 and the Android SDK are required. pjsip/swig are **not** needed — the fork builds on the
+pure-Kotlin SIP stack.
 ```bash
 cd voice-sip-agent-selfhost
 export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot"
@@ -285,32 +264,29 @@ export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot"
 
 ---
 
-## Честный статус и риски
+## Honest status and risks
 
-- Входящий звонок (двусторонний звук), входящая SMS, встроенный регистратор — **подтверждены**
-  на Nubia NX769J.
-- Исходящие звонки/SMS с дальнего телефона через SIM шлюза — **не сделаны**.
-- **Интернет-часть ещё не проверена вживую** — только одна Wi-Fi.
-- **Shizuku без root не переживает перезагрузку** — главный эксплуатационный риск (см. выше).
-- Безопасность открытого `5062` без аутентификации — главный риск продакшена.
+- Incoming call (two-way audio), incoming SMS, built-in registrar — **confirmed** on the Nubia NX769J.
+- Outgoing calls/SMS from the far phone over the gateway's SIM — **not done**.
+- **The internet path is not yet tested live** — a single Wi-Fi only.
+- **Without root, Shizuku does not survive a reboot** — the main operational risk (above).
+- An open `:5062` with no auth is the main production risk.
 
 ---
 
-## Лицензия и благодарности
+## License and credits
 
-Форк [**sparkcyf/android-voice-sip-agent**](https://github.com/sparkcyf/android-voice-sip-agent).
-Лицензия — **GNU GPL, версия 2 или новее** (GPL-2.0-or-later; см. [`LICENSE`](LICENSE)). Наши
-изменения распространяются на тех же условиях — репозиторий остаётся открытым.
+A fork of [**sparkcyf/android-voice-sip-agent**](https://github.com/sparkcyf/android-voice-sip-agent).
+License — **GNU GPL, version 2 or later** (GPL-2.0-or-later; see [`LICENSE`](LICENSE)). Our changes
+are distributed under the same terms — the repository stays open.
 
-Оговорка по сторонним библиотекам: upstream в release-сборке статически линкует pjsip
-(GPL-2.0-or-later), OpenSSL (Apache-2.0) и libopus (BSD-3-Clause). **Наш форк по умолчанию
-собирается на чисто-Kotlin SIP-стеке без нативного pjsip**, поэтому в дефолтной сборке этих
-библиотек нет. Если включать `pjsua2`-стек — вернутся и их лицензии (см. упоминание в
-[`README.upstream.md`](README.upstream.md)).
+Third-party note: upstream statically links pjsip (GPL-2.0-or-later), OpenSSL (Apache-2.0) and
+libopus (BSD-3-Clause) in release builds. **This fork builds on a pure-Kotlin SIP stack with no
+native pjsip by default**, so the default build does not include those libraries. Enabling the
+`pjsua2` stack brings their licenses back (see the note in [`README.upstream.md`](README.upstream.md)).
 
-Оригинальные README сохранены как [`README.upstream.md`](README.upstream.md) и `README.zh.md`.
+The original READMEs are preserved as [`README.upstream.md`](README.upstream.md) and `README.zh.md`.
+Thanks to the author for the Shizuku-based call-audio interception — track A without root rests on it.
 
-**Credits.** Код писал Claude (Anthropic) по задачам владельца; владелец ставил задачи и
-тестировал каждую сборку на живом устройстве.
-Спасибо автору за механику перехвата звука вызова через Shizuku — на ней держится весь трек A
-без root.
+**Credits.** The code was written by Claude (Anthropic) to the owner's tasks; the owner set the
+tasks and tested every build on a live device.
