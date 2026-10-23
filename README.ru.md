@@ -1,7 +1,7 @@
 # voice-sip-agent-selfhost - телефон-шлюз «устройство в себе», без root (Android 13+)
 
 > 🇬🇧 **[English version →](README.md)** · 🇷🇺 Русская версия (этот файл).
-> Оригинальные README проекта - [`README.upstream.md`](README.upstream.md) и `README.zh.md`.
+> Оригинальный README проекта - [`README.upstream.md`](README.upstream.md).
 
 > 👉 **Новичку - начни отсюда:** [`docs/КАК-НАСТРОИТЬ.md`](docs/КАК-НАСТРОИТЬ.md) - пошаговая
 > инструкция «с нуля» простым языком (поставь то, включи это, проброс портов).
@@ -333,7 +333,7 @@ export JAVA_HOME="/c/Program Files/Eclipse Adoptium/jdk-17.0.20.101-hotspot"
 библиотек нет. Если включать `pjsua2`-стек - вернутся и их лицензии (см. упоминание в
 [`README.upstream.md`](README.upstream.md)).
 
-Оригинальные README сохранены как [`README.upstream.md`](README.upstream.md) и `README.zh.md`.
+Оригинальный README сохранён как [`README.upstream.md`](README.upstream.md).
 
 **Credits.** Код писал Claude (Anthropic) по задачам владельца; владелец ставил задачи и
 тестировал каждую сборку на живом устройстве.

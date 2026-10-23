@@ -1,8 +1,7 @@
 # voice-sip-agent-selfhost - a "device-in-itself" phone gateway, no root (Android 13+)
 
 > 🇷🇺 **[Русская версия →](README.ru.md)** (fuller, with the project's own notes) ·
-> 🇬🇧 English (this file). Original project READMEs: [`README.upstream.md`](README.upstream.md)
-> and `README.zh.md`.
+> 🇬🇧 English (this file). Original project README: [`README.upstream.md`](README.upstream.md).
 
 > 👉 **New here?** A plain-language, from-scratch step-by-step guide (install this, enable that,
 > forward ports) is in [`docs/КАК-НАСТРОИТЬ.md`](docs/КАК-НАСТРОИТЬ.md) (Russian).
@@ -317,7 +316,7 @@ libopus (BSD-3-Clause) in release builds. **This fork builds on a pure-Kotlin SI
 native pjsip by default**, so the default build does not include those libraries. Enabling the
 `pjsua2` stack brings their licenses back (see the note in [`README.upstream.md`](README.upstream.md)).
 
-The original READMEs are preserved as [`README.upstream.md`](README.upstream.md) and `README.zh.md`.
+The original README is preserved as [`README.upstream.md`](README.upstream.md).
 Thanks to the author for the Shizuku-based call-audio interception - track A without root rests on it.
 
 **Credits.** The code was written by Claude (Anthropic) to the owner's tasks; the owner set the
