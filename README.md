@@ -148,6 +148,10 @@ gives "CANDIDATE/NOPE", the working audio method, bootloader state, and the reco
 
 ## Installing on the gateway phone
 
+> 📦 **Prebuilt files are in [Releases](https://github.com/Hinduc0der/voice-sip-agent-selfhost/releases):**
+> the `voice-sip-agent-selfhost-*.apk` installs directly - building is optional (see
+> [Building the APK](#building-the-apk)). Get Shizuku from its own [Releases](https://github.com/RikkaApps/Shizuku/releases).
+
 1. Enable Developer options → USB debugging, connect to a PC, allow debugging.
 2. Install **Shizuku** (patched one on MediaTek/Xiaomi/Android 16, where the normal build crashes):
    ```bash

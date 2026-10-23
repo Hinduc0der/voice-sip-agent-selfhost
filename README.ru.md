@@ -166,6 +166,10 @@ adb shell "dumpsys media.audio_policy | grep -E 'TELEPHONY_TX|TELEPHONY_RX'"
 
 ## Установка на телефон-шлюз
 
+> 📦 **Готовый APK - в [Releases](https://github.com/Hinduc0der/voice-sip-agent-selfhost/releases):**
+> `voice-sip-agent-selfhost-*.apk` ставится сразу, собирать самому не обязательно (сборка - в разделе
+> [Сборка APK](#сборка-apk)). Shizuku берётся из его [Releases](https://github.com/RikkaApps/Shizuku/releases).
+
 1. Включить «Для разработчиков» → «Отладка по USB», подключить к ПК, разрешить отладку.
 2. Поставить **Shizuku** (на MediaTek/Xiaomi/Android 16 - патченый, обычный там падает):
    ```bash
