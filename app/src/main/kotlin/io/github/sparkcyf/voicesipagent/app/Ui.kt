@@ -95,8 +95,8 @@ fun helpText(key: String, lang: UiLang): Pair<String, String>? {
         )
         "server_mode" -> p(
             "Режим «устройство в себе»", "Device-in-itself mode",
-            "Включён (рекомендуется): этот телефон сам работает SIP-сервером. Твой софтфон (Linphone и т.п.) регистрируется прямо на него — внешний сервер/АТС не нужны.\n\nВыключен: шлюз сам подключается к внешней SIP-АТС — тогда заполни поля PBX host / user / password ниже.",
-            "On (recommended): this phone is its own SIP server. Your softphone (Linphone etc.) registers straight to it — no external server/PBX needed.\n\nOff: the gateway registers to an external SIP PBX — then fill in PBX host / user / password below.",
+            "Включён (рекомендуется): этот телефон сам работает SIP-сервером. Твой софтфон (например baresip) регистрируется прямо на него — внешний сервер/АТС не нужны.\n\nВыключен: шлюз сам подключается к внешней SIP-АТС — тогда заполни поля PBX host / user / password ниже.",
+            "On (recommended): this phone is its own SIP server. Your softphone (e.g. baresip) registers straight to it — no external server/PBX needed.\n\nOff: the gateway registers to an external SIP PBX — then fill in PBX host / user / password below.",
         )
         "local_port" -> p(
             "Порт регистратора", "Local SIP port",
@@ -195,15 +195,15 @@ fun faqEntries(lang: UiLang): List<Pair<String, String>> {
         ),
         e(
             "Какой софтфон ставить на ДАЛЬНИЙ телефон (Android)?",
-            "Рекомендуем Linphone — бесплатный, открытый, работает в фоне. Где взять: Google Play, F-Droid или linphone.org. После установки: выключи оптимизацию батареи для Linphone и разреши фоновую работу/автозапуск, иначе регистрация будет слетать. Альтернатива: Zoiper.\n\nНастройка аккаунта: Username — любой (например s23), Password — любой, Domain — «<IP телефона-шлюза>:<порт регистратора>», Transport — UDP. И обязательно выдай Linphone доступ к микрофону.",
+            "Рекомендуем baresip — бесплатный, открытый, работает в фоне и умеет page-mode SMS. Где взять: F-Droid (пакет com.tutpro.baresip). После установки: выключи оптимизацию батареи для baresip и разреши фоновую работу/автозапуск, иначе регистрация будет слетать.\n\nНастройка аккаунта: меню ⋮ → «Профили» → поле «SIP URI или Новый аккаунт» → «sip:s23@<IP телефона-шлюза>:<порт регистратора>» → «+». Порт в адресе обязателен. В редакторе аккаунта: «Пароль аутентификации» — тот же пароль, что на шлюзе (пусто только для локальной сети), транспорт UDP, включи тумблер «Регистрация». И обязательно выдай baresip доступ к микрофону.",
             "Which softphone for the FIELD phone (Android)?",
-            "We recommend Linphone — free, open-source, runs in the background. Where to get it: Google Play, F-Droid, or linphone.org. After installing: turn off battery optimization for Linphone and allow background/autostart, otherwise the registration will keep dropping. Alternative: Zoiper.\n\nAccount setup: Username — anything (e.g. s23), Password — anything, Domain — «<gateway phone IP>:<registrar port>», Transport — UDP. And do grant Linphone microphone access.",
+            "We recommend baresip — free, open-source, runs in the background, and does page-mode SMS. Where to get it: F-Droid (package com.tutpro.baresip). After installing: turn off battery optimization for baresip and allow background/autostart, otherwise the registration will keep dropping.\n\nAccount setup: menu ⋮ → «Accounts» → «SIP URI or New account» field → «sip:s23@<gateway phone IP>:<registrar port>» → «+». The port in the address is required. In the account editor: «Auth password» — the same password set on the gateway (empty only for a local network), transport UDP, enable the «Registration» toggle. And do grant baresip microphone access.",
         ),
         e(
             "А на iPhone (iOS)?",
-            "Честно: iOS выгружает приложения из фона, поэтому надёжный приём звонков при «своём» сервере без push-уведомлений не гарантирован — приложение должно быть открыто. Клиенты: Linphone (iOS) и Groundwire/Bria (платные) умеют push, но push идёт через их облако, а не через наш встроенный сервер. Практичнее в роли дальнего телефона держать Android; iPhone хорошо подойдёт для исходящих и при открытом приложении.",
+            "Честно: iOS выгружает приложения из фона, поэтому надёжный приём звонков при «своём» сервере без push-уведомлений не гарантирован — приложение должно быть открыто. Push на iOS умеют платные клиенты (Groundwire, Bria), но их push идёт через их облако, а не через наш встроенный сервер. Практичнее в роли дальнего телефона держать Android (baresip); iPhone хорошо подойдёт для исходящих и при открытом приложении.",
             "What about iPhone (iOS)?",
-            "Honestly: iOS suspends backgrounded apps, so reliable incoming-call delivery with a self-hosted, push-less server is not guaranteed — the app must be in the foreground. Clients: Linphone (iOS) and Groundwire/Bria (paid) do support push, but their push goes through their cloud, not our built-in server. It's more practical to use an Android phone as the field device; an iPhone works well for outbound and while the app is open.",
+            "Honestly: iOS suspends backgrounded apps, so reliable incoming-call delivery with a self-hosted, push-less server is not guaranteed — the app must be in the foreground. Paid iOS clients (Groundwire, Bria) do support push, but their push goes through their cloud, not our built-in server. It's more practical to use an Android phone as the field device (baresip); an iPhone works well for outbound and while the app is open.",
         ),
         e(
             "Почему протухает регистрация SIP?",
@@ -224,10 +224,10 @@ fun faqEntries(lang: UiLang): List<Pair<String, String>> {
             "Almost always the «Cellular audio method» (see the ⓘ on that item under Advanced). Switch between «Direct telephony» and «Call redirection» and call again. If only you can't be heard — check that the softphone has microphone access.",
         ),
         e(
-            "Linphone виснет на «подключении»",
-            "1) Нет ли на телефоне-шлюзе постороннего VPN — он заворачивает SIP в туннель. Отключи любой VPN на шлюзе. 2) Оба телефона в одной сети, в роутере нет «изоляции клиентов». 3) Верные IP:порт и транспорт UDP.",
-            "Linphone hangs on «connecting»",
-            "1) Check for a stray VPN on the gateway phone — it tunnels the SIP traffic away. Disable any VPN on the gateway. 2) Both phones on the same network, no «client isolation» on the router. 3) Correct IP:port and UDP transport.",
+            "Софтфон виснет на «подключении»",
+            "1) Оба телефона в одной сети, в роутере нет «изоляции клиентов». 2) Верные IP:порт и транспорт UDP. 3) Правильный пароль регистратора в софтфоне — тот же, что задан на шлюзе.",
+            "Softphone hangs on «connecting»",
+            "1) Both phones on the same network, no «client isolation» on the router. 2) Correct IP:port and UDP transport. 3) Correct registrar password in the softphone — the same one set on the gateway.",
         ),
         e(
             "Как работать не в одной Wi-Fi (в поездке)?",

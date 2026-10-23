@@ -50,7 +50,7 @@ data class GatewaySettings(
     /** Which SIP implementation backs the PBX side. */
     val sipStack: SipStack = SipStack.BUILTIN,
     /**
-     * Device-in-itself mode: this phone hosts the SIP registrar. A softphone (e.g. Linphone
+     * Device-in-itself mode: this phone hosts the SIP registrar. A softphone (e.g. baresip
      * in the field) registers directly to it; no external PBX/server is involved. When on,
      * [server]/[username]/[password] are not required.
      */

@@ -282,8 +282,8 @@ private fun SettingsSection(rt: GatewayRuntime) {
     Section(t("Настройки", "Settings")) {
         // Core mode: this phone is its own SIP server, or it registers to an external PBX.
         Toggle(t("Режим «устройство в себе» (встроенный SIP-сервер)", "Device-in-itself mode (built-in SIP server)"), serverMode, { serverMode = it }, info = "server_mode") {
-            if (serverMode) t("Этот телефон сам — SIP-сервер; софтфон (Linphone) регистрируется прямо на него. Внешний сервер не нужен, поля PBX ниже необязательны.",
-                "This phone hosts the SIP registrar; your softphone (e.g. Linphone) registers straight to it. No external PBX is needed, so the PBX fields below are optional.")
+            if (serverMode) t("Этот телефон сам — SIP-сервер; софтфон (baresip) регистрируется прямо на него. Внешний сервер не нужен, поля PBX ниже необязательны.",
+                "This phone hosts the SIP registrar; your softphone (e.g. baresip) registers straight to it. No external PBX is needed, so the PBX fields below are optional.")
             else t("Выкл: шлюз регистрируется на внешнюю SIP-АТС. Заполни PBX host, user и password ниже.",
                 "Off: this gateway registers to an external PBX / SIP server. Fill in PBX host, user and password below.")
         }
